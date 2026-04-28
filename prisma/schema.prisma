@@ -1,0 +1,188 @@
+// Prisma schema file
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+// Stores
+model Store {
+  id        String   @id @default(uuid())
+  name      String
+  subdomain String?  @unique
+  plan      Plan     @default(FREE)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  users     User[]
+  products  Product[]
+  customers Customer[]
+  invoices  Invoice[]
+  debts     Debt[]
+
+  @@map("stores")
+}
+
+enum Plan {
+  FREE
+  PRO
+}
+
+// Users
+model User {
+  id        String   @id @default(uuid())
+  username  String
+  password  String
+  role      Role     @default(CASHIER)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Foreign key
+  storeId   String
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@unique([username, storeId]) // Same username can exist in different stores
+  @@map("users")
+}
+
+enum Role {
+  ADMIN
+  CASHIER
+}
+
+// Products
+model Product {
+  id        String   @id @default(uuid())
+  name      String
+  barcode   String?
+  price     Decimal  @db.Decimal(10, 2)
+  stock     Int      @default(0)
+  minStock  Int      @default(5) // Low stock alert threshold
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Foreign key
+  storeId   String
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  // Relations
+  invoiceItems InvoiceItem[]
+
+  @@unique([barcode, storeId]) // Barcode must be unique within a store
+  @@map("products")
+}
+
+// Customers
+model Customer {
+  id        String   @id @default(uuid())
+  name      String
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Foreign key
+  storeId   String
+  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  // Relations
+  invoices  Invoice[]
+  debts     Debt[]
+
+  @@map("customers")
+}
+
+// Invoices
+model Invoice {
+  id            String        @id @default(uuid())
+  number        Int
+  date          DateTime      @default(now())
+  total         Decimal       @db.Decimal(10, 2)
+  paid          Decimal       @default(0) @db.Decimal(10, 2)
+  remaining     Decimal       @default(0) @db.Decimal(10, 2)
+  paymentMethod PaymentMethod @default(CASH)
+  notes         String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  // Foreign keys
+  customerId    String?
+  customer      Customer?     @relation(fields: [customerId], references: [id])
+  storeId       String
+  store         Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  // Relations
+  items         InvoiceItem[]
+  debt          Debt?
+
+  @@unique([number, storeId]) // Invoice number must be unique within a store
+  @@map("invoices")
+}
+
+enum PaymentMethod {
+  CASH      // Full cash payment
+  DEBT      // Full amount as debt
+  PARTIAL   // Partial payment
+}
+
+// Invoice items
+model InvoiceItem {
+  id          String  @id @default(uuid())
+  productName String  // Save the name at sale time
+  barcode     String?
+  price       Decimal @db.Decimal(10, 2)
+  quantity    Int
+  total       Decimal @db.Decimal(10, 2)
+
+  // Foreign keys
+  invoiceId   String
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  productId   String?
+  product     Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@map("invoice_items")
+}
+
+// Debts
+model Debt {
+  id        String   @id @default(uuid())
+  amount    Decimal  @db.Decimal(10, 2) // Original debt amount
+  paid      Decimal  @default(0) @db.Decimal(10, 2)
+  remaining Decimal  @db.Decimal(10, 2)
+  isPaid    Boolean  @default(false)
+  date      DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Foreign keys
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+  invoiceId  String   @unique // One debt record per invoice
+  invoice    Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  storeId    String
+  store      Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  // Relations
+  payments   DebtPayment[]
+
+  @@map("debts")
+}
+
+// Debt payments
+model DebtPayment {
+  id        String   @id @default(uuid())
+  amount    Decimal  @db.Decimal(10, 2)
+  date      DateTime @default(now())
+  notes     String?
+
+  // Foreign key
+  debtId    String
+  debt      Debt     @relation(fields: [debtId], references: [id], onDelete: Cascade)
+
+  @@map("debt_payments")
+}
