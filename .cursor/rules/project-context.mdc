@@ -1,0 +1,71 @@
+---
+description: Project context and architecture for the Cashier System (Multi-tenant SaaS POS)
+alwaysApply: true
+---
+
+# Cashier System — Multi-tenant SaaS POS
+
+NestJS backend for a cloud-based POS system. Each store is a tenant with isolated data.
+
+## Stack
+- **Framework:** NestJS + TypeScript
+- **ORM:** Prisma (`generated/prisma` output)
+- **DB:** PostgreSQL
+- **Auth:** JWT (payload: `sub` = userId, `storeId`, `role`)
+
+## Multi-tenancy Rule
+`storeId` is **never** sent in the request body. It is always extracted from the JWT token and injected by the backend automatically.
+
+## Models (schema.prisma)
+- `Store` — id, name, subdomain, plan (FREE/PRO), isActive
+- `User` — id, username, password, role (ADMIN/CASHIER), storeId
+- `Product` — id, name, barcode, price, stock, minStock, storeId
+- `Customer` — id, name, phone, storeId
+- `Invoice` — id, number, date, total, paid, remaining, paymentMethod (CASH/DEBT/PARTIAL), customerId?, storeId
+- `InvoiceItem` — id, productName, barcode, price, quantity, total, invoiceId, productId?
+- `Debt` — id, amount, paid, remaining, isPaid, customerId, invoiceId (unique), storeId
+- `DebtPayment` — id, amount, date, notes, debtId
+
+## Auth Workflow
+
+### Register (POST /api/auth/register)
+- Body: `{ name: string, username: string, password: string }`
+- Creates Store + Admin user in a single `$transaction`
+- Returns JWT token
+
+### Login (POST /api/auth/login)
+- Body: `{ subdomain: string, username: string, password: string }`
+- Finds store by subdomain → finds user by `{ username, storeId }` → bcrypt compare
+- Returns JWT token
+
+## Key Business Rules
+1. Barcode unique per store only (`@@unique([barcode, storeId])`)
+2. Invoice number unique per store (`@@unique([number, storeId])`)
+3. On invoice create: deduct stock, block if insufficient quantity
+4. `DEBT` or `PARTIAL` payment → auto-create a `Debt` record, requires `customerId`
+5. Debt payment: update `paid` + `remaining`, never exceed `amount`
+6. All queries auto-filtered by `storeId` from token (use Prisma middleware)
+7. User from Store A cannot access Store B data
+
+## DTOs Style
+Use `Pick<Model, ...>` and `Omit<Model, ...>` from `generated/prisma` imports.
+Composite DTOs (cross-model) use intersection `&`.
+
+```typescript
+import { User, Store } from 'generated/prisma';
+
+export type RegisterDTO = Pick<Store, 'name'> & Pick<User, 'username' | 'password'>;
+export type LoginDTO = Pick<Store, 'subdomain'> & Pick<User, 'username' | 'password'>;
+export type UserResponseDTO = { token: string; userData: Omit<User, 'password' | 'store'> };
+```
+
+## Reports (filtered by storeId from token)
+- Daily sales total
+- Total outstanding debts
+- Low stock alerts (`stock < minStock`)
+- Best-selling products
+
+## Best Practices
+- Use `$transaction` for: invoice creation (create invoice + deduct stock + create debt)
+- Use Prisma middleware to auto-inject `storeId` on all queries
+- Use Global Exception Filter for unified JSON error responses

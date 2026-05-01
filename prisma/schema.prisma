@@ -1,8 +1,9 @@
 // Prisma schema file
 
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider     = "prisma-client"
+  output       = "../generated/prisma"
+  moduleFormat = "cjs"
 }
 
 datasource db {
@@ -10,13 +11,13 @@ datasource db {
 }
 // Stores
 model Store {
-  id        String   @id @default(uuid())
+  id        String      @id @default(uuid())
   name      String
-  subdomain String?  @unique
-  plan      Plan     @default(FREE)
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  subdomain String?     @unique
+  plan      Plan        @default(FREE)
+  status    StoreStatus @default(PENDING)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
 
   // Relations
   users     User[]
@@ -33,25 +34,38 @@ enum Plan {
   PRO
 }
 
+enum StoreStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
 // Users
 model User {
-  id        String   @id @default(uuid())
-  username  String
-  password  String
-  role      Role     @default(CASHIER)
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                    String    @id @default(uuid())
+  username              String
+  email                 String    @unique
+  password              String
+  role                  Role      @default(CASHIER)
+  isActive              Boolean   @default(true)
+  isEmailVerified       Boolean   @default(false)
+  emailVerificationCode String?
+  resetToken            String?   @unique
+  resetTokenExpiry      DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
-  // Foreign key
-  storeId   String
-  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  // Foreign key — null for SUPER_ADMIN (platform-level user, no store)
+  storeId   String?
+  store     Store?   @relation(fields: [storeId], references: [id], onDelete: Cascade)
 
   @@unique([username, storeId]) // Same username can exist in different stores
   @@map("users")
 }
 
 enum Role {
+  SUPER_ADMIN
   ADMIN
   CASHIER
 }
