@@ -10,17 +10,24 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe({ whitelist: true }));
 
   const config = new DocumentBuilder()
-    .setTitle('Cashier System API')
-    .setDescription('Multi-tenant POS system API')
+    .setTitle('واجهة نظام الكاشير')
+    .setDescription('واجهة برمجية لنظام نقاط البيع السحابي متعدد المتاجر.')
     .setVersion('1.0')
     .addBearerAuth(
-      { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+      {
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT',
+        description: 'رمز الوصول JWT (الصق القيمة فقط، بدون كلمة Bearer)',
+      },
       'access-token',
     )
     .build();
 
   const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('api/docs', app, document);
+  SwaggerModule.setup('api/docs', app, document, {
+    customSiteTitle: 'توثيق واجهة نظام الكاشير',
+  });
 
   await app.listen(process.env.PORT ?? 3000);
 }

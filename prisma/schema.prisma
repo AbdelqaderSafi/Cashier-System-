@@ -89,6 +89,7 @@ model Product {
   // Relations
   invoiceItems InvoiceItem[]
 
+  @@index([storeId])
   @@unique([barcode, storeId]) // Barcode must be unique within a store
   @@map("products")
 }

@@ -11,7 +11,7 @@ import { JwtGuard } from '../../common/guards/jwt.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 
-@ApiTags('Super Admin')
+@ApiTags('المشرف العام')
 @ApiBearerAuth('access-token')
 @UseGuards(JwtGuard, RolesGuard)
 @Roles('SUPER_ADMIN')
@@ -20,12 +20,12 @@ export class SuperAdminController {
   constructor(private readonly storeService: StoreService) {}
 
   @Patch(':storeId/approve')
-  @ApiOperation({ summary: 'Approve a pending store (Super Admin only)' })
-  @ApiParam({ name: 'storeId', description: 'UUID of the store to approve' })
-  @ApiResponse({ status: 200, description: 'Store approved and welcome email sent to owner' })
-  @ApiResponse({ status: 400, description: 'Store is already approved or email not verified' })
-  @ApiResponse({ status: 403, description: 'Forbidden — SUPER_ADMIN role required' })
-  @ApiResponse({ status: 404, description: 'Store not found' })
+  @ApiOperation({ summary: 'الموافقة على متجر قيد الانتظار (للمشرف العام فقط)' })
+  @ApiParam({ name: 'storeId', description: 'معرّف المتجر (UUID)' })
+  @ApiResponse({ status: 200, description: 'تمت الموافقة على المتجر وإرسال بريد ترحيب لمالكه' })
+  @ApiResponse({ status: 400, description: 'المتجر مُوافَق عليه مسبقاً أو البريد غير مُؤكَّد' })
+  @ApiResponse({ status: 403, description: 'ممنوع — مطلوب دور SUPER_ADMIN' })
+  @ApiResponse({ status: 404, description: 'المتجر غير موجود' })
   approveStore(@Param('storeId') storeId: string) {
     return this.storeService.approveStore(storeId);
   }

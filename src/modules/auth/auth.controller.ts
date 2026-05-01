@@ -3,62 +3,62 @@ import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { RegisterDTO, LoginDTO, SuperAdminLoginDTO, VerifyEmailDTO, ForgotPasswordDTO, ResetPasswordDTO } from './dto/auth.dto';
 
-@ApiTags('Auth')
+@ApiTags('المصادقة')
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('register')
-  @ApiOperation({ summary: 'Register a new store with an admin account' })
-  @ApiResponse({ status: 201, description: 'Store and admin created — pending super-admin approval' })
-  @ApiResponse({ status: 409, description: 'Store subdomain already taken' })
+  @ApiOperation({ summary: 'تسجيل متجر جديد مع حساب مدير' })
+  @ApiResponse({ status: 201, description: 'تم إنشاء المتجر والمدير — بانتظار موافقة المشرف العام' })
+  @ApiResponse({ status: 409, description: 'نطاق المتجر الفرعي مستخدم مسبقاً' })
   register(@Body() dto: RegisterDTO) {
     return this.authService.register(dto);
   }
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Login with subdomain + username + password' })
-  @ApiResponse({ status: 200, description: 'Login successful, returns JWT token' })
-  @ApiResponse({ status: 404, description: 'Store not found' })
-  @ApiResponse({ status: 401, description: 'Invalid credentials or account disabled' })
+  @ApiOperation({ summary: 'تسجيل الدخول: النطاق الفرعي + اسم المستخدم + كلمة المرور' })
+  @ApiResponse({ status: 200, description: 'تم تسجيل الدخول بنجاح — يُعاد رمز JWT' })
+  @ApiResponse({ status: 404, description: 'المتجر غير موجود' })
+  @ApiResponse({ status: 401, description: 'بيانات الدخول غير صحيحة أو الحساب معطّل' })
   login(@Body() dto: LoginDTO) {
     return this.authService.login(dto);
   }
 
   @Post('super-admin/login')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Super Admin login — username + password only (no subdomain)' })
-  @ApiResponse({ status: 200, description: 'Login successful, returns JWT with SUPER_ADMIN role' })
-  @ApiResponse({ status: 401, description: 'Invalid credentials or account disabled' })
+  @ApiOperation({ summary: 'دخول المشرف العام — اسم المستخدم وكلمة المرور فقط (بدون نطاق فرعي)' })
+  @ApiResponse({ status: 200, description: 'تم تسجيل الدخول — يُعاد JWT بدور SUPER_ADMIN' })
+  @ApiResponse({ status: 401, description: 'بيانات الدخول غير صحيحة أو الحساب معطّل' })
   superAdminLogin(@Body() dto: SuperAdminLoginDTO) {
     return this.authService.superAdminLogin(dto);
   }
 
   @Post('verify-email')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Verify email using the 6-digit OTP sent after registration' })
-  @ApiResponse({ status: 200, description: 'Email verified — store is now awaiting super-admin approval' })
-  @ApiResponse({ status: 400, description: 'Invalid OTP or email already verified' })
-  @ApiResponse({ status: 404, description: 'No account found with this email' })
+  @ApiOperation({ summary: 'تأكيد البريد الإلكتروني باستخدام رمز مكوّن من 6 أرقام' })
+  @ApiResponse({ status: 200, description: 'تم التحقق من البريد — المتجر بانتظار موافقة المشرف العام' })
+  @ApiResponse({ status: 400, description: 'رمز غير صالح أو البريد مُؤكَّد مسبقاً' })
+  @ApiResponse({ status: 404, description: 'لا يوجد حساب بهذا البريد' })
   verifyEmail(@Body() dto: VerifyEmailDTO) {
     return this.authService.verifyEmail(dto);
   }
 
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Request a password reset link via email' })
-  @ApiResponse({ status: 200, description: 'Reset link sent if the email exists' })
+  @ApiOperation({ summary: 'طلب رابط إعادة تعيين كلمة المرور عبر البريد' })
+  @ApiResponse({ status: 200, description: 'يُرسل الرابط إن وُجد البريد في النظام' })
   forgotPassword(@Body() dto: ForgotPasswordDTO) {
     return this.authService.forgotPassword(dto);
   }
 
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Reset password using the token from the email' })
-  @ApiResponse({ status: 200, description: 'Password reset successfully' })
-  @ApiResponse({ status: 400, description: 'Token expired' })
-  @ApiResponse({ status: 404, description: 'Invalid or expired token' })
+  @ApiOperation({ summary: 'إعادة تعيين كلمة المرور باستخدام الرمز من البريد' })
+  @ApiResponse({ status: 200, description: 'تم تغيير كلمة المرور بنجاح' })
+  @ApiResponse({ status: 400, description: 'انتهت صلاحية الرمز' })
+  @ApiResponse({ status: 404, description: 'رمز غير صالح أو منتهٍ' })
   resetPassword(@Body() dto: ResetPasswordDTO) {
     return this.authService.resetPassword(dto);
   }
