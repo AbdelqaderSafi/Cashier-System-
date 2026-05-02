@@ -1,0 +1,108 @@
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  Query,
+  ParseUUIDPipe,
+  UseGuards,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiParam,
+  ApiQuery,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
+import { CustomerService } from './customer.service';
+import { CreateCustomerDto } from './dto/create-customer.dto';
+import { UpdateCustomerDto } from './dto/update-customer.dto';
+import { CustomerQueryDto } from './dto/customer-query.dto';
+import { JwtGuard } from '../../common/guards/jwt.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import type { JwtPayload } from '../../common/decorators/current-user.decorator';
+
+@ApiTags('العملاء')
+@ApiBearerAuth('access-token')
+@UseGuards(JwtGuard, RolesGuard)
+@Controller('customers')
+export class CustomerController {
+  constructor(private readonly customerService: CustomerService) {}
+
+  @Post()
+  @Roles('ADMIN')
+  @ApiOperation({ summary: 'إنشاء عميل جديد في المتجر الحالي (للمدير فقط)' })
+  @ApiResponse({ status: 201, description: 'تم إنشاء العميل بنجاح' })
+  @ApiResponse({ status: 403, description: 'ممنوع — مطلوب دور ADMIN' })
+  create(@CurrentUser() user: JwtPayload, @Body() dto: CreateCustomerDto) {
+    return this.customerService.create(user.storeId, dto);
+  }
+
+  @Get()
+  @Roles('ADMIN', 'CASHIER')
+  @ApiOperation({ summary: 'قائمة العملاء مع بحث اختياري وترقيم الصفحات' })
+  @ApiQuery({ name: 'search', required: false, description: 'البحث بالاسم أو رقم الهاتف' })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1, description: 'رقم الصفحة' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20, description: 'عدد العناصر لكل صفحة' })
+  @ApiResponse({ status: 200, description: 'قائمة عملاء مُرقّمة' })
+  findAll(@CurrentUser() user: JwtPayload, @Query() query: CustomerQueryDto) {
+    return this.customerService.findAll(user.storeId, query);
+  }
+
+  @Get(':id')
+  @Roles('ADMIN', 'CASHIER')
+  @ApiOperation({ summary: 'جلب عميل بالمعرّف (يشمل آخر 20 فاتورة وكافة الديون مع سجل الدفعات)' })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف العميل' })
+  @ApiResponse({ status: 200, description: 'العميل مع فواتيره وديونه' })
+  @ApiResponse({ status: 404, description: 'العميل غير موجود' })
+  findOne(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
+    return this.customerService.findOne(user.storeId, id);
+  }
+
+  @Get(':id/debt-summary')
+  @Roles('ADMIN', 'CASHIER')
+  @ApiOperation({ summary: 'ملخص ديون العميل — الإجماليات + تفاصيل كل دين' })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف العميل' })
+  @ApiResponse({ status: 200, description: 'ملخص ديون العميل' })
+  @ApiResponse({ status: 404, description: 'العميل غير موجود' })
+  getDebtSummary(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
+    return this.customerService.getDebtSummary(user.storeId, id);
+  }
+
+  @Patch(':id')
+  @Roles('ADMIN')
+  @ApiOperation({ summary: 'تحديث بيانات العميل (للمدير فقط)' })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف العميل' })
+  @ApiResponse({ status: 200, description: 'تم تحديث العميل' })
+  @ApiResponse({ status: 404, description: 'العميل غير موجود' })
+  update(
+    @CurrentUser() user: JwtPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateCustomerDto,
+  ) {
+    return this.customerService.update(user.storeId, id, dto);
+  }
+
+  @Delete(':id')
+  @Roles('ADMIN')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary:
+      'حذف عميل نهائياً (للمدير فقط). يُمنع الحذف إذا كان لديه ديون غير مسددة.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف العميل' })
+  @ApiResponse({ status: 204, description: 'تم حذف العميل' })
+  @ApiResponse({ status: 400, description: 'لا يمكن الحذف — يوجد ديون غير مسددة' })
+  @ApiResponse({ status: 404, description: 'العميل غير موجود' })
+  async remove(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
+    await this.customerService.remove(user.storeId, id);
+  }
+}
