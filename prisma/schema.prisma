@@ -142,6 +142,7 @@ model Invoice {
 
 enum PaymentMethod {
   CASH      // Full cash payment
+  ONLINE    // Online payment
   DEBT      // Full amount as debt
   PARTIAL   // Partial payment
 }
