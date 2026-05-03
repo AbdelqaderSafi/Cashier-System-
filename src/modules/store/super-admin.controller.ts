@@ -1,4 +1,4 @@
-import { Controller, Patch, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Patch, Param, UseGuards } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -18,6 +18,14 @@ import { Roles } from '../../common/decorators/roles.decorator';
 @Controller('admin/stores')
 export class SuperAdminController {
   constructor(private readonly storeService: StoreService) {}
+
+  @Get()
+  @ApiOperation({ summary: 'جلب جميع المتاجر (للمشرف العام فقط)' })
+  @ApiResponse({ status: 200, description: 'قائمة بجميع المتاجر' })
+  @ApiResponse({ status: 403, description: 'ممنوع — مطلوب دور SUPER_ADMIN' })
+  getAllStores() {
+    return this.storeService.findAll();
+  }
 
   @Patch(':storeId/approve')
   @ApiOperation({ summary: 'الموافقة على متجر قيد الانتظار (للمشرف العام فقط)' })

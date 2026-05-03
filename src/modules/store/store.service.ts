@@ -16,21 +16,74 @@ export class StoreService {
   ) {}
 
   generateSubdomain(name: string): string {
-    return name
+    const latinized = name
       .toLowerCase()
       .trim()
       .replace(/\s+/g, '-')
-      .replace(/[^a-z0-9-]/g, '');
+      .replace(/[^a-z0-9-]/g, '')
+      .replace(/^-+|-+$/g, '');
+
+    if (latinized.length >= 3) {
+      return latinized;
+    }
+
+    // Fallback for Arabic/non-Latin names: generate a unique slug
+    const randomSuffix = Math.random().toString(36).slice(2, 8);
+    return `store-${randomSuffix}`;
   }
 
   async checkSubdomainTaken(subdomain: string): Promise<void> {
+    if (!subdomain || subdomain.length < 3) {
+      throw new BadRequestException(
+        'Could not generate a valid subdomain. Please use a store name with English letters.',
+      );
+    }
     const existing = await this.db.store.findUnique({ where: { subdomain } });
     if (existing) throw new ConflictException('Store subdomain already taken');
   }
 
+  async generateUniqueSubdomain(name: string): Promise<string> {
+    const latinized = name
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-z0-9-]/g, '')
+      .replace(/^-+|-+$/g, '');
+
+    const base = latinized.length >= 3 ? latinized : 'store';
+
+    let subdomain = base;
+    let attempt = 0;
+
+    while (attempt < 10) {
+      const existing = await this.db.store.findUnique({ where: { subdomain } });
+      if (!existing) return subdomain;
+      const suffix = Math.random().toString(36).slice(2, 7);
+      subdomain = `${base}-${suffix}`;
+      attempt++;
+    }
+
+    throw new ConflictException('Failed to generate a unique subdomain. Please try again.');
+  }
+
+  async findAll() {
+    return this.db.store.findMany({
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        name: true,
+        subdomain: true,
+        plan: true,
+        status: true,
+        createdAt: true,
+        updatedAt: true,
+        _count: { select: { users: true, products: true, customers: true } },
+      },
+    });
+  }
+
   async create(dto: CreateStoreDTO) {
-    const subdomain = this.generateSubdomain(dto.name);
-    await this.checkSubdomainTaken(subdomain);
+    const subdomain = await this.generateUniqueSubdomain(dto.name);
     return this.db.store.create({ data: { name: dto.name, subdomain } });
   }
 

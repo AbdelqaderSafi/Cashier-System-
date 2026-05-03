@@ -31,8 +31,7 @@ export class AuthService {
   ) {}
 
   async register(dto: RegisterDTO): Promise<RegisterResponseDTO> {
-    const subdomain = this.storeService.generateSubdomain(dto.name);
-    await this.storeService.checkSubdomainTaken(subdomain);
+    const subdomain = await this.storeService.generateUniqueSubdomain(dto.name);
 
     const hashedPassword = await bcrypt.hash(dto.password, 10);
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
