@@ -189,13 +189,15 @@ export class DebtService {
         data: { paid: newPaid, remaining: newRemaining, isPaid },
       });
 
-      await tx.invoice.update({
-        where: { id: debt.invoiceId },
-        data: {
-          paid: { increment: dto.amount },
-          remaining: newRemaining,
-        },
-      });
+      if (debt.invoiceId) {
+        await tx.invoice.update({
+          where: { id: debt.invoiceId },
+          data: {
+            paid: { increment: dto.amount },
+            remaining: newRemaining,
+          },
+        });
+      }
 
       return {
         payment,
@@ -265,10 +267,12 @@ export class DebtService {
         data: { paid: newPaid, remaining: newRemaining, isPaid: false },
       });
 
-      await tx.invoice.update({
-        where: { id: debt.invoiceId },
-        data: { paid: { decrement: Number(payment.amount) }, remaining: newRemaining },
-      });
+      if (debt.invoiceId) {
+        await tx.invoice.update({
+          where: { id: debt.invoiceId },
+          data: { paid: { decrement: Number(payment.amount) }, remaining: newRemaining },
+        });
+      }
     });
   }
 
@@ -332,11 +336,13 @@ export class DebtService {
           data: { paid: newPaid, remaining: newRemaining, isPaid },
         });
 
-        // Update the linked invoice
-        await tx.invoice.update({
-          where: { id: debt.invoiceId },
-          data: { paid: { increment: applyAmount }, remaining: newRemaining },
-        });
+        // Opening-balance debts have no linked invoice — skip the invoice sync
+        if (debt.invoiceId) {
+          await tx.invoice.update({
+            where: { id: debt.invoiceId },
+            data: { paid: { increment: applyAmount }, remaining: newRemaining },
+          });
+        }
 
         affectedDebts.push({ debtId: debt.id, amountPaid: applyAmount, isPaid });
       }

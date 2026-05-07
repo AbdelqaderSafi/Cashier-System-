@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsNotEmpty, IsString, IsOptional, MaxLength } from 'class-validator';
+import { IsNotEmpty, IsString, IsOptional, IsNumber, Min, MaxLength } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class CreateCustomerDto {
   @ApiProperty({ example: 'محمد أحمد', description: 'اسم العميل' })
@@ -13,4 +14,14 @@ export class CreateCustomerDto {
   @IsString()
   @MaxLength(30)
   phone?: string;
+
+  @ApiPropertyOptional({
+    example: 150.0,
+    description: 'دين سابق (رصيد افتتاحي) قبل استخدام النظام. يُنشئ سجل دين مباشرةً عند إضافة العميل.',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  initialDebt?: number;
 }

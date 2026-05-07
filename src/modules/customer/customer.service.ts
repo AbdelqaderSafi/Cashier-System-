@@ -34,12 +34,31 @@ export class CustomerService {
   async create(storeId: string | null, dto: CreateCustomerDto): Promise<Customer> {
     const sid = this.requireStoreId(storeId);
 
-    return this.db.customer.create({
-      data: {
-        name: dto.name,
-        phone: dto.phone ?? null,
-        storeId: sid,
-      },
+    return this.db.$transaction(async (tx) => {
+      const customer = await tx.customer.create({
+        data: {
+          name: dto.name,
+          phone: dto.phone ?? null,
+          storeId: sid,
+        },
+      });
+
+      if (dto.initialDebt && dto.initialDebt > 0) {
+        await tx.debt.create({
+          data: {
+            amount: dto.initialDebt,
+            paid: 0,
+            remaining: dto.initialDebt,
+            isPaid: false,
+            invoiceId: null,
+            notes: 'دين سابق - رصيد افتتاحي عند التأسيس',
+            customerId: customer.id,
+            storeId: sid,
+          },
+        });
+      }
+
+      return customer;
     });
   }
 

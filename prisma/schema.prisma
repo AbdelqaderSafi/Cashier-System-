@@ -176,14 +176,19 @@ model Debt {
   isPaid    Boolean  @default(false)
   date      DateTime @default(now())
   updatedAt DateTime @updatedAt
+  // null for opening-balance debts ("دين سابق - رصيد افتتاحي عند التأسيس")
+  notes     String?
 
   // Foreign keys
   customerId String
-  customer   Customer @relation(fields: [customerId], references: [id])
-  invoiceId  String   @unique // One debt record per invoice
-  invoice    Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  customer   Customer  @relation(fields: [customerId], references: [id])
+  // Nullable: null for opening-balance debts (no linked invoice).
+  // @unique still enforces one debt per invoice for non-null values;
+  // PostgreSQL allows multiple NULLs in a unique index.
+  invoiceId  String?   @unique
+  invoice    Invoice?  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   storeId    String
-  store      Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  store      Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
 
   // Relations
   payments   DebtPayment[]

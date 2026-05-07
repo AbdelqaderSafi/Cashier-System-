@@ -164,9 +164,13 @@ export class SyncDebtDto {
   @IsUUID()
   customerId!: string;
 
-  @ApiProperty({ example: 'invoice-uuid', description: 'معرّف الفاتورة المرتبطة بالدين' })
+  @ApiPropertyOptional({
+    example: 'invoice-uuid',
+    description: 'معرّف الفاتورة المرتبطة بالدين. فارغ للديون السابقة (الرصيد الافتتاحي).',
+  })
+  @IsOptional()
   @IsUUID()
-  invoiceId!: string;
+  invoiceId?: string;
 }
 
 // ─── Debt Payment ─────────────────────────────────────────────────────────────
