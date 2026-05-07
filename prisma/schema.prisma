@@ -72,15 +72,16 @@ enum Role {
 
 // Products
 model Product {
-  id        String   @id @default(uuid())
-  name      String
-  barcode   String?
-  price     Decimal  @db.Decimal(10, 2)
-  stock     Int      @default(0)
-  minStock  Int      @default(5) // Low stock alert threshold
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             String   @id @default(uuid())
+  name           String
+  barcode        String?
+  price          Decimal  @db.Decimal(10, 2)
+  wholesalePrice Decimal  @default(0) @db.Decimal(10, 2) // Cost / purchase price
+  stock          Int      @default(0)
+  minStock       Int      @default(5) // Low stock alert threshold
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   // Foreign key
   storeId   String
@@ -153,6 +154,7 @@ model InvoiceItem {
   productName String  // Save the name at sale time
   barcode     String?
   price       Decimal @db.Decimal(10, 2)
+  unitCost    Decimal @default(0) @db.Decimal(10, 2) // Cost frozen at sale time
   quantity    Int
   total       Decimal @db.Decimal(10, 2)
 

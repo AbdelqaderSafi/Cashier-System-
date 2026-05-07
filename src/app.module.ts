@@ -10,6 +10,7 @@ import { InvoiceModule } from './modules/invoice/invoice.module';
 import { DebtModule } from './modules/debt/debt.module';
 import { BackupModule } from './modules/backup/backup.module';
 import { SyncModule } from './modules/sync/sync.module';
+import { ReportsModule } from './modules/reports/reports.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { SyncModule } from './modules/sync/sync.module';
     DebtModule,
     BackupModule,
     SyncModule,
+    ReportsModule,
   ],
 })
 export class AppModule {}

@@ -36,6 +36,17 @@ export class CreateProductDto {
   @Type(() => Number)
   price!: number;
 
+  @ApiPropertyOptional({
+    example: 1.8,
+    default: 0,
+    description: 'سعر الجملة / تكلفة الشراء (حتى منزلتين عشريتين)',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  wholesalePrice?: number;
+
   @ApiPropertyOptional({ example: 100, default: 0, description: 'كمية المخزون الابتدائية' })
   @IsOptional()
   @IsInt()

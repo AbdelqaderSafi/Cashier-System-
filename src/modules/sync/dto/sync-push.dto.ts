@@ -53,6 +53,17 @@ export class SyncInvoiceItemDto {
   @Type(() => Number)
   total!: number;
 
+  @ApiPropertyOptional({
+    example: 9.0,
+    default: 0,
+    description: 'تكلفة الوحدة وقت البيع (مجمَّدة من سعر الجملة)',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  unitCost?: number;
+
   @ApiPropertyOptional({ example: 'product-uuid', description: 'معرّف المنتج في قاعدة البيانات (لخصم المخزون)' })
   @IsOptional()
   @IsUUID()

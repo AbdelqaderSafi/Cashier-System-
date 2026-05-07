@@ -109,6 +109,7 @@ export class SyncService {
                 productName: item.productName,
                 barcode: item.barcode ?? null,
                 price: item.price,
+                unitCost: item.unitCost ?? 0,
                 quantity: item.quantity,
                 total: item.total,
                 productId: item.productId ?? null,

@@ -39,6 +39,16 @@ export class UpdateProductDto {
   @Type(() => Number)
   price?: number;
 
+  @ApiPropertyOptional({
+    example: 2.2,
+    description: 'سعر الجملة / تكلفة الشراء (حتى منزلتين عشريتين)',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  wholesalePrice?: number;
+
   @ApiPropertyOptional({ example: 50, description: 'كمية المخزون المطلوب تعيينها' })
   @IsOptional()
   @IsInt()
