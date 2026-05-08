@@ -1,16 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { MailerService } from '@nestjs-modules/mailer';
+import { Resend } from 'resend';
 import type { Attachment } from 'nodemailer/lib/mailer';
 
 @Injectable()
 export class MailService {
   private readonly logger = new Logger(MailService.name);
-
-  constructor(private readonly mailer: MailerService) {}
+  private readonly resend = new Resend(process.env.RESEND_API_KEY);
+  private readonly from = process.env.MAIL_FROM ?? 'Safi POS <noreply@safi-pos.com>';
 
   async sendEmailVerificationOtp(email: string, username: string, otp: string) {
     try {
-      await this.mailer.sendMail({
+      await this.resend.emails.send({
+        from: this.from,
         to: email,
         subject: 'Verify Your Email — Safi POS',
         html: `
@@ -68,9 +69,10 @@ export class MailService {
     username: string,
   ) {
     try {
-      await this.mailer.sendMail({
+      await this.resend.emails.send({
+        from: this.from,
         to: email,
-        subject: `🎉 Your store "${storeName}" has been approved — Safi POS`,
+        subject: `Your store "${storeName}" has been approved — Safi POS`,
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #111827;">
             <div style="background: #4F46E5; padding: 32px 24px; border-radius: 8px 8px 0 0; text-align: center;">
@@ -144,7 +146,8 @@ export class MailService {
     resetLink: string,
   ) {
     try {
-      await this.mailer.sendMail({
+      await this.resend.emails.send({
+        from: this.from,
         to: email,
         subject: 'Reset Your Safi POS Password',
         html: `
@@ -200,7 +203,8 @@ export class MailService {
     attachments: Attachment[],
   ) {
     try {
-      await this.mailer.sendMail({
+      await this.resend.emails.send({
+        from: this.from,
         to: email,
         subject: `Daily Debt Backup - ${storeName} — ${date}`,
         html: `
@@ -220,7 +224,7 @@ export class MailService {
               <div style="background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 8px;
                           padding: 16px 20px; margin: 24px 0; text-align: center;">
                 <p style="margin: 0; font-size: 14px; color: #6B7280;">
-                  📎 <b>Attachment:</b> debt-backup-${date}.pdf
+                  <b>Attachment:</b> debt-backup-${date}.pdf
                 </p>
               </div>
 
@@ -236,7 +240,10 @@ export class MailService {
             </div>
           </div>
         `,
-        attachments,
+        attachments: attachments.map((a) => ({
+          filename: a.filename as string,
+          content: a.content as Buffer,
+        })),
       });
     } catch (error) {
       this.logger.error(
