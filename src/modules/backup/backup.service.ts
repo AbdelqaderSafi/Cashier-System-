@@ -106,7 +106,6 @@ export class BackupService {
       {
         filename: `debt-report-${today}.pdf`,
         content: pdfBuffer,
-        contentType: 'application/pdf',
       },
     ]);
 
