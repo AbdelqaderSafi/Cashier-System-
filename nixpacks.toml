@@ -1,3 +1,6 @@
+[variables]
+NODE_VERSION = "20"
+
 [phases.setup]
 aptPkgs = [
   "libnspr4",
