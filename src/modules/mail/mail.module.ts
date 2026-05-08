@@ -9,11 +9,11 @@ import { MailService } from './mail.service';
         host: process.env.SMTP_HOST,
         port: Number(process.env.SMTP_PORT) || 587,
         secure: false,
-        family: 4,
         auth: {
           user: process.env.SMTP_USER,
           pass: process.env.SMTP_PASS,
         },
+        ...({ family: 4 } as any),
       },
       defaults: {
         from: `"Safi POS" <${process.env.SMTP_USER}>`,
