@@ -13,7 +13,7 @@ RUN npm install
 RUN npm run build
 
 # Verify dist was created — fails the build if missing
-RUN test -f dist/main.js && echo "✔ dist/main.js found" || (echo "✘ dist/main.js NOT found!" && ls -la dist/ 2>/dev/null || echo "dist/ does not exist" && exit 1)
+RUN test -f dist/src/main.js && echo "✔ dist/src/main.js found" || (echo "✘ dist/src/main.js NOT found!" && ls -la dist/ 2>/dev/null || echo "dist/ does not exist" && exit 1)
 
 
 # ─── Stage 2: Run ─────────────────────────────────────────────────────────────
@@ -58,4 +58,4 @@ COPY --from=builder /app/assets        ./assets
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main"]
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/src/main"]
