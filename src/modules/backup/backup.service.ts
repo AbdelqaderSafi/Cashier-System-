@@ -12,13 +12,14 @@ interface CustomerDebtRow {
 
 /** Browsers to try in order. Add Linux paths for production servers. */
 const BROWSER_CANDIDATES = [
+  process.env.PUPPETEER_EXECUTABLE_PATH,
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
   '/usr/bin/google-chrome',
   '/usr/bin/chromium-browser',
   '/usr/bin/chromium',
-];
+].filter(Boolean) as string[];
 
 @Injectable()
 export class BackupService {
