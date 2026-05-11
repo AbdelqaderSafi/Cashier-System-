@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Body,
   Param,
   Delete,
@@ -22,6 +23,7 @@ import {
 } from '@nestjs/swagger';
 import { InvoiceService } from './invoice.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
+import { UpdateInvoiceDto } from './dto/update-invoice.dto';
 import { InvoiceQueryDto } from './dto/invoice-query.dto';
 import { JwtGuard } from '../../common/guards/jwt.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -92,6 +94,24 @@ export class InvoiceController {
   @ApiResponse({ status: 404, description: 'الفاتورة غير موجودة' })
   findOne(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
     return this.invoiceService.findOne(user.storeId, id);
+  }
+
+  @Patch(':id')
+  @Roles('ADMIN', 'CASHIER')
+  @ApiOperation({
+    summary:
+      'تعديل فاتورة — يُعيد ضبط المخزون تلقائياً ويدعم استبدال المنتجات وتغيير طريقة الدفع',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف الفاتورة' })
+  @ApiResponse({ status: 200, description: 'تم تحديث الفاتورة بنجاح' })
+  @ApiResponse({ status: 400, description: 'بيانات غير صالحة أو مخزون غير كافٍ أو دين عليه دفعات' })
+  @ApiResponse({ status: 404, description: 'الفاتورة أو المنتج أو العميل غير موجود' })
+  update(
+    @CurrentUser() user: JwtPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateInvoiceDto,
+  ) {
+    return this.invoiceService.update(user.storeId, id, dto);
   }
 
   @Delete(':id')

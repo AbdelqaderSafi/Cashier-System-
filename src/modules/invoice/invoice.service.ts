@@ -7,6 +7,7 @@ import {
 import type { Invoice, Prisma } from 'generated/prisma/client';
 import { DatabaseService } from '../database/database.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
+import { UpdateInvoiceDto } from './dto/update-invoice.dto';
 import { InvoiceQueryDto } from './dto/invoice-query.dto';
 
 export type PaginatedInvoices = {
@@ -179,6 +180,262 @@ export class InvoiceService {
       }
 
       return invoice;
+    });
+  }
+
+  // ─── Update Invoice ────────────────────────────────────────────────────────────
+
+  async update(storeId: string | null, id: string, dto: UpdateInvoiceDto): Promise<Invoice> {
+    const sid = this.requireStoreId(storeId);
+
+    // 1. Fetch current invoice with full details
+    const invoice = await this.db.invoice.findFirst({
+      where: { id, storeId: sid },
+      include: {
+        items: { select: { id: true, productId: true, quantity: true } },
+        debt: {
+          select: {
+            id: true,
+            amount: true,
+            paid: true,
+            remaining: true,
+            isPaid: true,
+            payments: { select: { id: true } },
+          },
+        },
+      },
+    });
+
+    if (!invoice) throw new NotFoundException('الفاتورة غير موجودة');
+
+    // 2. Determine final payment method
+    const paymentMethod = dto.paymentMethod ?? invoice.paymentMethod;
+    const needsCustomer = paymentMethod === 'DEBT' || paymentMethod === 'PARTIAL';
+    const wasDebt =
+      invoice.paymentMethod === 'DEBT' || invoice.paymentMethod === 'PARTIAL';
+
+    // 3. Resolve customerId
+    let customerId: string | null;
+    if (dto.customerId !== undefined) {
+      customerId = needsCustomer ? dto.customerId : null;
+    } else {
+      customerId = needsCustomer ? (invoice.customerId ?? null) : null;
+    }
+
+    if (needsCustomer && !customerId) {
+      throw new BadRequestException('معرّف العميل مطلوب عند الدفع بالآجل أو الجزئي');
+    }
+
+    if (customerId) {
+      const customer = await this.db.customer.findFirst({
+        where: { id: customerId, storeId: sid },
+        select: { id: true },
+      });
+      if (!customer) throw new NotFoundException('العميل غير موجود');
+    }
+
+    // 4. Build new invoice items (if provided)
+    type NewItem = {
+      productName: string;
+      barcode: string | null;
+      price: number;
+      quantity: number;
+      total: number;
+      productId: string;
+    };
+
+    let newInvoiceItems: NewItem[] | null = null;
+    let total: number = Number(invoice.total);
+
+    if (dto.items !== undefined) {
+      if (dto.items.length === 0) {
+        throw new BadRequestException('الفاتورة يجب أن تحتوي على بند واحد على الأقل');
+      }
+
+      const productIds = dto.items.map((i) => i.productId);
+      const products = await this.db.product.findMany({
+        where: { id: { in: productIds }, storeId: sid, isActive: true },
+      });
+
+      if (products.length !== productIds.length) {
+        const foundIds = new Set(products.map((p) => p.id));
+        const missing = productIds.filter((pid) => !foundIds.has(pid));
+        throw new NotFoundException(
+          `المنتجات التالية غير موجودة أو غير نشطة: ${missing.join(', ')}`,
+        );
+      }
+
+      const productMap = new Map(products.map((p) => [p.id, p]));
+
+      newInvoiceItems = dto.items.map((item) => {
+        const product = productMap.get(item.productId)!;
+        const price = Number(product.price);
+        const itemTotal = +(price * item.quantity).toFixed(2);
+        return {
+          productName: product.name,
+          barcode: product.barcode ?? null,
+          price,
+          quantity: item.quantity,
+          total: itemTotal,
+          productId: product.id,
+        };
+      });
+
+      total = +newInvoiceItems.reduce((sum, item) => sum + item.total, 0).toFixed(2);
+    }
+
+    // 5. Calculate paid / remaining
+    let paid: number;
+    let remaining: number;
+
+    switch (paymentMethod) {
+      case 'CASH':
+      case 'ONLINE':
+        paid = total;
+        remaining = 0;
+        break;
+      case 'DEBT':
+        paid = 0;
+        remaining = total;
+        break;
+      case 'PARTIAL': {
+        // Use the provided paid amount or fall back to the invoice's existing paid amount
+        const paidAmount =
+          dto.paid !== undefined ? dto.paid : Number(invoice.paid);
+        if (paidAmount >= total) {
+          throw new BadRequestException(
+            'المبلغ المدفوع يجب أن يكون أقل من إجمالي الفاتورة عند الدفع الجزئي',
+          );
+        }
+        if (paidAmount <= 0) {
+          throw new BadRequestException('المبلغ المدفوع يجب أن يكون أكبر من صفر');
+        }
+        paid = paidAmount;
+        remaining = +(total - paidAmount).toFixed(2);
+        break;
+      }
+      default:
+        paid = total;
+        remaining = 0;
+    }
+
+    // 6. Debt constraints
+    if (wasDebt && !needsCustomer) {
+      // Switching from DEBT/PARTIAL → CASH/ONLINE: block if payments already recorded
+      if (invoice.debt && invoice.debt.payments.length > 0) {
+        throw new BadRequestException(
+          'لا يمكن تغيير طريقة الدفع — الدين عليه دفعات مسجلة. قم بتسوية الدين أولاً.',
+        );
+      }
+    }
+
+    if (wasDebt && needsCustomer && invoice.debt) {
+      // Updating existing debt: new remaining must not be less than payments already made
+      const alreadyPaidOnDebt = Number(invoice.debt.paid);
+      if (remaining < alreadyPaidOnDebt) {
+        throw new BadRequestException(
+          `لا يمكن تعديل الفاتورة — المبلغ المتبقي الجديد (${remaining}) أقل مما تم دفعه فعلاً على الدين (${alreadyPaidOnDebt})`,
+        );
+      }
+    }
+
+    // 7. Execute everything in a single transaction
+    return this.db.$transaction(async (tx) => {
+      if (newInvoiceItems !== null) {
+        // a. Restore stock for all OLD items
+        for (const oldItem of invoice.items) {
+          if (oldItem.productId) {
+            await tx.product.update({
+              where: { id: oldItem.productId },
+              data: { stock: { increment: oldItem.quantity } },
+            });
+          }
+        }
+
+        // b. Check stock availability and deduct for NEW items
+        for (const newItem of newInvoiceItems) {
+          const product = await tx.product.findUnique({
+            where: { id: newItem.productId },
+            select: { stock: true, name: true },
+          });
+          if (!product || product.stock < newItem.quantity) {
+            throw new BadRequestException(
+              `الكمية المطلوبة (${newItem.quantity}) من "${newItem.productName}" تتجاوز المخزون المتوفر (${product?.stock ?? 0})`,
+            );
+          }
+          await tx.product.update({
+            where: { id: newItem.productId },
+            data: { stock: { decrement: newItem.quantity } },
+          });
+        }
+      }
+
+      // c. Update the invoice (replace items if provided)
+      const updatedInvoice = await tx.invoice.update({
+        where: { id },
+        data: {
+          paymentMethod,
+          total,
+          paid,
+          remaining,
+          customerId,
+          notes: dto.notes !== undefined ? (dto.notes ?? null) : invoice.notes,
+          ...(newInvoiceItems !== null && {
+            items: {
+              deleteMany: {},
+              create: newInvoiceItems,
+            },
+          }),
+        },
+        include: {
+          items: true,
+          customer: { select: { id: true, name: true, phone: true } },
+          debt: {
+            select: {
+              id: true,
+              amount: true,
+              paid: true,
+              remaining: true,
+              isPaid: true,
+            },
+          },
+        },
+      });
+
+      // d. Handle debt record changes
+      if (wasDebt && !needsCustomer) {
+        // DEBT/PARTIAL → CASH/ONLINE: delete the debt (validated above: no payments)
+        if (invoice.debt) {
+          await tx.debt.delete({ where: { id: invoice.debt.id } });
+        }
+      } else if (!wasDebt && needsCustomer) {
+        // CASH/ONLINE → DEBT/PARTIAL: create a new debt
+        await tx.debt.create({
+          data: {
+            amount: remaining,
+            paid: 0,
+            remaining,
+            customerId: customerId!,
+            invoiceId: id,
+            storeId: sid,
+          },
+        });
+      } else if (wasDebt && needsCustomer && invoice.debt) {
+        // DEBT/PARTIAL → DEBT/PARTIAL: update existing debt
+        const alreadyPaid = Number(invoice.debt.paid);
+        const newDebtRemaining = +(remaining - alreadyPaid).toFixed(2);
+        await tx.debt.update({
+          where: { id: invoice.debt.id },
+          data: {
+            amount: remaining,
+            remaining: Math.max(newDebtRemaining, 0),
+            isPaid: newDebtRemaining <= 0,
+            customerId: customerId!,
+          },
+        });
+      }
+
+      return updatedInvoice;
     });
   }
 
