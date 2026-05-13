@@ -83,11 +83,13 @@ export class InvoiceService {
     const invoiceItems = dto.items.map((item) => {
       const product = productMap.get(item.productId)!;
       const price = Number(product.price);
+      const unitCost = Number(product.wholesalePrice);
       const itemTotal = +(price * item.quantity).toFixed(2);
       return {
         productName: product.name,
         barcode: product.barcode,
         price,
+        unitCost,
         quantity: item.quantity,
         total: itemTotal,
         productId: product.id,
@@ -270,11 +272,13 @@ export class InvoiceService {
       newInvoiceItems = dto.items.map((item) => {
         const product = productMap.get(item.productId)!;
         const price = Number(product.price);
+        const unitCost = Number(product.wholesalePrice);
         const itemTotal = +(price * item.quantity).toFixed(2);
         return {
           productName: product.name,
           barcode: product.barcode ?? null,
           price,
+          unitCost,
           quantity: item.quantity,
           total: itemTotal,
           productId: product.id,
