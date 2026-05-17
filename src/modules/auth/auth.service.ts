@@ -55,10 +55,15 @@ export class AuthService {
       });
     });
 
-    await this.mailService.sendEmailVerificationOtp(dto.email, dto.username, otp);
+    await this.mailService.sendEmailVerificationOtp(
+      dto.email,
+      dto.username,
+      otp,
+    );
 
     return {
-      message: 'Registration successful. A 6-digit verification code has been sent to your email. Please verify your email to proceed.',
+      message:
+        'Registration successful. A 6-digit verification code has been sent to your email. Please verify your email to proceed.',
     };
   }
 
@@ -72,7 +77,9 @@ export class AuthService {
     }
 
     if (user.emailVerificationCode !== dto.otp) {
-      throw new BadRequestException('Invalid OTP code. Please check your email and try again.');
+      throw new BadRequestException(
+        'Invalid OTP code. Please check your email and try again.',
+      );
     }
 
     await this.db.user.update({
@@ -81,7 +88,8 @@ export class AuthService {
     });
 
     return {
-      message: 'Email verified successfully. Your store registration is now under review by our team.',
+      message:
+        'Email verified successfully. Your store registration is now under review by our team.',
     };
   }
 
@@ -154,8 +162,14 @@ export class AuthService {
       data: { resetToken: token, resetTokenExpiry: expiry },
     });
 
-    const resetLink = `https://safi-pos.com/reset-password?token=${token}`;
-    await this.mailService.sendPasswordResetEmail(user.email, user.username, resetLink);
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const resetLink = `${frontendUrl}/reset-password?token=${token}`;
+
+    await this.mailService.sendPasswordResetEmail(
+      user.email,
+      user.username,
+      resetLink,
+    );
 
     return { message: 'If this email exists, a reset link has been sent.' };
   }
@@ -170,7 +184,9 @@ export class AuthService {
     }
 
     if (user.resetTokenExpiry < new Date()) {
-      throw new BadRequestException('Reset token has expired. Please request a new one.');
+      throw new BadRequestException(
+        'Reset token has expired. Please request a new one.',
+      );
     }
 
     const hashedPassword = await bcrypt.hash(dto.newPassword, 10);
@@ -184,6 +200,8 @@ export class AuthService {
       },
     });
 
-    return { message: 'Password has been reset successfully. You can now log in.' };
+    return {
+      message: 'Password has been reset successfully. You can now log in.',
+    };
   }
 }
