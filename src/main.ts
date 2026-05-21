@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
+import { TimingInterceptor } from './common/interceptors/timing.interceptor';
 import type { Request, Response } from 'express';
 
 dns.setDefaultResultOrder('ipv4first');
@@ -16,6 +17,7 @@ async function bootstrap() {
 
   app.setGlobalPrefix('api');
   app.useGlobalPipes(new ValidationPipe({ whitelist: true }));
+  app.useGlobalInterceptors(new TimingInterceptor());
 
   const config = new DocumentBuilder()
     .setTitle('واجهة نظام الكاشير')
