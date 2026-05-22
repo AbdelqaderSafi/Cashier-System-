@@ -18,7 +18,13 @@
       "Bash(where chrome *)",
       "Read(//c/Program Files \\(x86\\)/Microsoft/Edge/Application/**)",
       "Read(//c/Program Files/Microsoft/Edge/Application/**)",
-      "Bash(pandoc API_CHANGES_FOR_FRONTEND.md -o API_CHANGES_FOR_FRONTEND.html --standalone --self-contained --css=style.css --metadata title=\"دليل تغييرات الـ API للفرونتند\")"
+      "Bash(pandoc API_CHANGES_FOR_FRONTEND.md -o API_CHANGES_FOR_FRONTEND.html --standalone --self-contained --css=style.css --metadata title=\"دليل تغييرات الـ API للفرونتند\")",
+      "Bash(npx ts-node *)",
+      "Bash(\"/c/Program Files \\(x86\\)/Microsoft/Edge/Application/msedge.exe\" --headless --disable-gpu --no-pdf-header-footer --no-margins --print-to-pdf=\"C:\\\\Users\\\\M.S.I\\\\Desktop\\\\Ibrahim market\\\\casheer-system\\\\docs\\\\debt-report-preview.pdf\" \"file:///C:/Users/M.S.I/Desktop/Ibrahim%20market/casheer-system/docs/debt-report-preview.html\")",
+      "Bash(awk '{print $NF, $5}')",
+      "Bash(node scripts/preview-final-debt-report.js)",
+      "Bash(\"/c/Program Files \\(x86\\)/Microsoft/Edge/Application/msedge.exe\" --headless --disable-gpu --no-pdf-header-footer --print-to-pdf=\"C:\\\\Users\\\\M.S.I\\\\Desktop\\\\Ibrahim market\\\\casheer-system\\\\docs\\\\debt-report-FINAL.pdf\" \"file:///C:/Users/M.S.I/Desktop/Ibrahim%20market/casheer-system/docs/debt-report-FINAL.html\")",
+      "Bash(rm docs/debt-report-*.html docs/debt-report-*.pdf docs/email-body-preview.html scripts/preview-debt-mockups.ts scripts/preview-debt-report.ts scripts/preview-production-debt-report.ts && echo \"حُذف\" && echo \"\" && echo \"اللي بقي في docs/:\" && ls docs/ && echo \"\" && echo \"اللي بقي في scripts/:\" && ls scripts/ 2>/dev/null || echo \"\\(scripts/ فاضي\\)\")"
     ]
   }
 }
