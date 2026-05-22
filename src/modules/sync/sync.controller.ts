@@ -1,4 +1,13 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -9,13 +18,13 @@ import { SyncService } from './sync.service';
 import { SyncPushDto } from './dto/sync-push.dto';
 import { JwtGuard } from '../../common/guards/jwt.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { TenantGuard } from '../../common/guards/tenant.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import type { JwtPayload } from '../../common/decorators/current-user.decorator';
+import { StoreId } from '../../common/decorators/store-id.decorator';
 
 @ApiTags('المزامنة (Sync)')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtGuard, RolesGuard)
+@UseGuards(JwtGuard, TenantGuard, RolesGuard)
 @Controller('sync')
 export class SyncController {
   constructor(private readonly syncService: SyncService) {}
@@ -40,8 +49,13 @@ export class SyncController {
       },
     },
   })
-  getInitData(@CurrentUser() user: JwtPayload) {
-    return this.syncService.getInitData(user.storeId);
+  getInitData(
+    @StoreId() sid: string,
+    @Query('force-fresh') forceFresh?: string,
+  ) {
+    return this.syncService.getInitData(sid, {
+      forceFresh: forceFresh === 'true' || forceFresh === '1',
+    });
   }
 
   // ─── POST /sync/push ──────────────────────────────────────────────────────────
@@ -70,7 +84,7 @@ export class SyncController {
     },
   })
   @ApiResponse({ status: 400, description: 'بيانات غير صالحة أو مرجع دين غير موجود' })
-  push(@CurrentUser() user: JwtPayload, @Body() dto: SyncPushDto) {
-    return this.syncService.push(user.storeId, dto);
+  push(@StoreId() sid: string, @Body() dto: SyncPushDto) {
+    return this.syncService.push(sid, dto);
   }
 }

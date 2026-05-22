@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(npm install *)",
+      "Bash(node -e \"console.log\\(require\\('@nestjs/terminus/package.json'\\).version\\)\")",
+      "Bash(node -e \"console.log\\(Object.keys\\(require\\('@nestjs/terminus'\\)\\).join\\('\\\\n'\\)\\)\")",
+      "Read(//tmp/**)",
+      "Bash(npx prisma *)",
+      "Bash(node -e ' *)",
+      "Bash(where pandoc *)",
+      "Bash(where wkhtmltopdf *)",
+      "Bash(where xelatex *)",
+      "Bash(where pdflatex *)",
+      "Bash(where weasyprint *)",
+      "Bash(where msedge *)",
+      "Bash(where chrome *)",
+      "Read(//c/Program Files \\(x86\\)/Microsoft/Edge/Application/**)",
+      "Read(//c/Program Files/Microsoft/Edge/Application/**)",
+      "Bash(pandoc API_CHANGES_FOR_FRONTEND.md -o API_CHANGES_FOR_FRONTEND.html --standalone --self-contained --css=style.css --metadata title=\"دليل تغييرات الـ API للفرونتند\")"
+    ]
+  }
+}

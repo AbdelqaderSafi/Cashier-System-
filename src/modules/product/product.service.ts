@@ -1,14 +1,19 @@
 import {
+  Inject,
   Injectable,
   ConflictException,
-  ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
 import type { Product, Prisma } from 'generated/prisma/client';
 import { DatabaseService } from '../database/database.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { ProductQueryDto } from './dto/product-query.dto';
+import { paginate, paginatedResponse } from '../../common/utils/pagination';
+import { CacheKeys, CacheTtl } from '../../common/cache/cache-keys';
+import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
 
 export type PaginatedProducts = {
   data: Product[];
@@ -22,12 +27,11 @@ export type PaginatedProducts = {
 
 @Injectable()
 export class ProductService {
-  constructor(private readonly db: DatabaseService) {}
-
-  private requireStoreId(storeId: string | null): string {
-    if (!storeId) throw new ForbiddenException('Store context is required for this operation');
-    return storeId;
-  }
+  constructor(
+    private readonly db: DatabaseService,
+    @Inject(CACHE_MANAGER) private readonly cache: Cache,
+    private readonly cacheInvalidator: CacheInvalidationService,
+  ) {}
 
   private async assertBarcodeUnique(
     storeId: string,
@@ -46,14 +50,13 @@ export class ProductService {
 
   // ─── Create ──────────────────────────────────────────────────────────────────
 
-  async create(storeId: string | null, dto: CreateProductDto): Promise<Product> {
-    const sid = this.requireStoreId(storeId);
+  async create(sid: string, dto: CreateProductDto): Promise<Product> {
 
     if (dto.barcode) {
       await this.assertBarcodeUnique(sid, dto.barcode);
     }
 
-    return this.db.product.create({
+    const created = await this.db.product.create({
       data: {
         name: dto.name,
         barcode: dto.barcode ?? null,
@@ -64,15 +67,17 @@ export class ProductService {
         storeId: sid,
       },
     });
+
+    void this.cacheInvalidator.invalidateStoreData(sid, {
+      barcode: created.barcode,
+    });
+    return created;
   }
 
   // ─── List (paginated + filtered) ─────────────────────────────────────────────
 
-  async findAll(storeId: string | null, query: ProductQueryDto): Promise<PaginatedProducts> {
-    const sid = this.requireStoreId(storeId);
-    const page = query.page ?? 1;
-    const limit = query.limit ?? 20;
-    const skip = (page - 1) * limit;
+  async findAll(sid: string, query: ProductQueryDto): Promise<PaginatedProducts> {
+    const { skip, take, page, limit } = paginate(query);
 
     const where: Prisma.ProductWhereInput = {
       storeId: sid,
@@ -94,26 +99,17 @@ export class ProductService {
         where,
         orderBy: { createdAt: 'desc' },
         skip,
-        take: limit,
+        take,
       }),
       this.db.product.count({ where }),
     ]);
 
-    return {
-      data,
-      meta: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit),
-      },
-    };
+    return paginatedResponse(data, total, page, limit);
   }
 
   // ─── Low-stock alert (stock < minStock) ──────────────────────────────────────
 
-  async findLowStock(storeId: string | null): Promise<Product[]> {
-    const sid = this.requireStoreId(storeId);
+  async findLowStock(sid: string): Promise<Product[]> {
 
     // Column-to-column comparison — Prisma doesn't support it natively, use raw SQL
     return this.db.$queryRaw<Product[]>`
@@ -128,8 +124,11 @@ export class ProductService {
 
   // ─── Find by barcode ─────────────────────────────────────────────────────────
 
-  async findByBarcode(storeId: string | null, barcode: string): Promise<Product> {
-    const sid = this.requireStoreId(storeId);
+  async findByBarcode(sid: string, barcode: string): Promise<Product> {
+    // Cashier hits this on every scan — hot path. Cache 5 min.
+    const key = CacheKeys.productByBarcode(sid, barcode);
+    const cached = await this.cache.get<Product>(key);
+    if (cached) return cached;
 
     const product = await this.db.product.findFirst({
       where: { barcode, storeId: sid, isActive: true },
@@ -137,13 +136,13 @@ export class ProductService {
 
     if (!product) throw new NotFoundException('Product not found for the given barcode');
 
+    await this.cache.set(key, product, CacheTtl.PRODUCT_BARCODE);
     return product;
   }
 
   // ─── Find one by ID ───────────────────────────────────────────────────────────
 
-  async findOne(storeId: string | null, id: string): Promise<Product> {
-    const sid = this.requireStoreId(storeId);
+  async findOne(sid: string, id: string): Promise<Product> {
 
     const product = await this.db.product.findFirst({
       where: { id, storeId: sid },
@@ -171,12 +170,13 @@ export class ProductService {
 
   // ─── Update ───────────────────────────────────────────────────────────────────
 
-  async update(storeId: string | null, id: string, dto: UpdateProductDto): Promise<Product> {
-    const sid = this.requireStoreId(storeId);
-
+  async update(sid: string, id: string, dto: UpdateProductDto): Promise<Product> {
+    // Read existing row to learn the old barcode — we need to invalidate it
+    // explicitly even if `dto.barcode` is undefined (any update can affect
+    // the cached row's stock/price/isActive fields).
     const existing = await this.db.product.findFirst({
       where: { id, storeId: sid },
-      select: { id: true },
+      select: { id: true, barcode: true },
     });
     if (!existing) throw new NotFoundException('Product not found');
 
@@ -184,7 +184,7 @@ export class ProductService {
       await this.assertBarcodeUnique(sid, dto.barcode, id);
     }
 
-    return this.db.product.update({
+    const updated = await this.db.product.update({
       where: { id },
       data: {
         ...(dto.name !== undefined && { name: dto.name }),
@@ -196,21 +196,31 @@ export class ProductService {
         ...(dto.isActive !== undefined && { isActive: dto.isActive }),
       },
     });
+
+    // Invalidate both the old and (possibly) new barcode entries.
+    void this.cacheInvalidator.invalidateProductBarcode(sid, existing.barcode);
+    if (updated.barcode && updated.barcode !== existing.barcode) {
+      void this.cacheInvalidator.invalidateProductBarcode(sid, updated.barcode);
+    }
+    void this.cacheInvalidator.invalidateSyncInit(sid);
+    return updated;
   }
 
   // ─── Delete ───────────────────────────────────────────────────────────────────
 
-  async remove(storeId: string | null, id: string): Promise<void> {
-    const sid = this.requireStoreId(storeId);
-
+  async remove(sid: string, id: string): Promise<void> {
     const product = await this.db.product.findFirst({
       where: { id, storeId: sid },
-      select: { id: true },
+      select: { id: true, barcode: true },
     });
 
     if (!product) throw new NotFoundException('Product not found');
 
     // invoiceItems.productId will be set to null (onDelete: SetNull) — invoice history is preserved
     await this.db.product.delete({ where: { id } });
+
+    void this.cacheInvalidator.invalidateStoreData(sid, {
+      barcode: product.barcode,
+    });
   }
 }

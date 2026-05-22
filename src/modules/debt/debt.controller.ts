@@ -24,13 +24,13 @@ import { PayDebtDto } from './dto/pay-debt.dto';
 import { DebtQueryDto } from './dto/debt-query.dto';
 import { JwtGuard } from '../../common/guards/jwt.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { TenantGuard } from '../../common/guards/tenant.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import type { JwtPayload } from '../../common/decorators/current-user.decorator';
+import { StoreId } from '../../common/decorators/store-id.decorator';
 
 @ApiTags('الديون')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtGuard, RolesGuard)
+@UseGuards(JwtGuard, TenantGuard, RolesGuard)
 @Controller('debts')
 export class DebtController {
   constructor(private readonly debtService: DebtService) {}
@@ -48,8 +48,8 @@ export class DebtController {
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiResponse({ status: 200, description: 'قائمة ديون مُرقّمة' })
-  findAll(@CurrentUser() user: JwtPayload, @Query() query: DebtQueryDto) {
-    return this.debtService.findAll(user.storeId, query);
+  findAll(@StoreId() sid: string, @Query() query: DebtQueryDto) {
+    return this.debtService.findAll(sid, query);
   }
 
   // ─── GET /debts/summary ───────────────────────────────────────────────────────
@@ -58,8 +58,8 @@ export class DebtController {
   @Roles('ADMIN')
   @ApiOperation({ summary: 'ملخص إجمالي الديون للمتجر — المجموع الكلي والمتبقي وعدد غير المسددة' })
   @ApiResponse({ status: 200, description: 'ملخص الديون' })
-  getSummary(@CurrentUser() user: JwtPayload) {
-    return this.debtService.getSummary(user.storeId);
+  getSummary(@StoreId() sid: string) {
+    return this.debtService.getSummary(sid);
   }
 
   // ─── GET /debts/customer/:customerId ─────────────────────────────────────────
@@ -71,10 +71,10 @@ export class DebtController {
   @ApiResponse({ status: 200, description: 'ديون العميل مع الملخص' })
   @ApiResponse({ status: 404, description: 'العميل غير موجود' })
   findByCustomer(
-    @CurrentUser() user: JwtPayload,
+    @StoreId() sid: string,
     @Param('customerId', ParseUUIDPipe) customerId: string,
   ) {
-    return this.debtService.findByCustomer(user.storeId, customerId);
+    return this.debtService.findByCustomer(sid, customerId);
   }
 
   // ─── POST /debts/customer/:customerId/pay ─────────────────────────────────────
@@ -93,11 +93,11 @@ export class DebtController {
   @ApiResponse({ status: 400, description: 'لا توجد ديون أو المبلغ يتجاوز الإجمالي' })
   @ApiResponse({ status: 404, description: 'العميل غير موجود' })
   payForCustomer(
-    @CurrentUser() user: JwtPayload,
+    @StoreId() sid: string,
     @Param('customerId', ParseUUIDPipe) customerId: string,
     @Body() dto: PayDebtDto,
   ) {
-    return this.debtService.payForCustomer(user.storeId, customerId, dto);
+    return this.debtService.payForCustomer(sid, customerId, dto);
   }
 
   // ─── GET /debts/:id ───────────────────────────────────────────────────────────
@@ -108,8 +108,8 @@ export class DebtController {
   @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف الدين' })
   @ApiResponse({ status: 200, description: 'تفاصيل الدين الكاملة' })
   @ApiResponse({ status: 404, description: 'الدين غير موجود' })
-  findOne(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
-    return this.debtService.findOne(user.storeId, id);
+  findOne(@StoreId() sid: string, @Param('id', ParseUUIDPipe) id: string) {
+    return this.debtService.findOne(sid, id);
   }
 
   // ─── POST /debts/:id/pay ──────────────────────────────────────────────────────
@@ -124,11 +124,11 @@ export class DebtController {
   @ApiResponse({ status: 400, description: 'الدين مسدد بالفعل أو المبلغ يتجاوز المتبقي' })
   @ApiResponse({ status: 404, description: 'الدين غير موجود' })
   pay(
-    @CurrentUser() user: JwtPayload,
+    @StoreId() sid: string,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: PayDebtDto,
   ) {
-    return this.debtService.pay(user.storeId, id, dto);
+    return this.debtService.pay(sid, id, dto);
   }
 
   // ─── GET /debts/:id/payments ──────────────────────────────────────────────────
@@ -139,8 +139,8 @@ export class DebtController {
   @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف الدين' })
   @ApiResponse({ status: 200, description: 'دفعات الدين' })
   @ApiResponse({ status: 404, description: 'الدين غير موجود' })
-  getPayments(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
-    return this.debtService.getPayments(user.storeId, id);
+  getPayments(@StoreId() sid: string, @Param('id', ParseUUIDPipe) id: string) {
+    return this.debtService.getPayments(sid, id);
   }
 
   // ─── DELETE /debts/:id/payments/:paymentId ────────────────────────────────────
@@ -156,10 +156,10 @@ export class DebtController {
   @ApiResponse({ status: 204, description: 'تم حذف الدفعة' })
   @ApiResponse({ status: 404, description: 'الدين أو الدفعة غير موجودة' })
   async deletePayment(
-    @CurrentUser() user: JwtPayload,
+    @StoreId() sid: string,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('paymentId', ParseUUIDPipe) paymentId: string,
   ) {
-    await this.debtService.deletePayment(user.storeId, id, paymentId);
+    await this.debtService.deletePayment(sid, id, paymentId);
   }
 }

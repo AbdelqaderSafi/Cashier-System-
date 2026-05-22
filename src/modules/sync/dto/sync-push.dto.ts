@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsDateString,
@@ -117,8 +118,9 @@ export class SyncInvoiceDto {
   @MaxLength(500)
   notes?: string;
 
-  @ApiProperty({ type: [SyncInvoiceItemDto], description: 'بنود الفاتورة' })
+  @ApiProperty({ type: [SyncInvoiceItemDto], description: 'بنود الفاتورة (حد أقصى 100 بند)' })
   @IsArray()
+  @ArrayMaxSize(100, { message: 'الفاتورة لا يمكن أن تحتوي على أكثر من 100 بند' })
   @ValidateNested({ each: true })
   @Type(() => SyncInvoiceItemDto)
   items!: SyncInvoiceItemDto[];
@@ -207,29 +209,36 @@ export class SyncDebtPaymentDto {
 // ─── Root Push DTO ────────────────────────────────────────────────────────────
 
 export class SyncPushDto {
+  // Per-batch caps prevent a malicious/buggy client from forcing the server
+  // into an O(N) transaction that holds locks for minutes. Numbers chosen
+  // to comfortably exceed a real offline session (a busy day = ~50 sales)
+  // while still bounding the worst-case server work.
   @ApiProperty({
     type: [SyncInvoiceDto],
-    description: 'الفواتير المُنشأة أوف‌لاين (مع بنودها)',
+    description: 'الفواتير المُنشأة أوف‌لاين (حد أقصى 200)',
   })
   @IsArray()
+  @ArrayMaxSize(200, { message: 'لا يمكن مزامنة أكثر من 200 فاتورة في الدفعة الواحدة' })
   @ValidateNested({ each: true })
   @Type(() => SyncInvoiceDto)
   invoices!: SyncInvoiceDto[];
 
   @ApiProperty({
     type: [SyncDebtDto],
-    description: 'سجلات الديون المُنشأة أوف‌لاين',
+    description: 'سجلات الديون المُنشأة أوف‌لاين (حد أقصى 500)',
   })
   @IsArray()
+  @ArrayMaxSize(500, { message: 'لا يمكن مزامنة أكثر من 500 دين في الدفعة الواحدة' })
   @ValidateNested({ each: true })
   @Type(() => SyncDebtDto)
   debts!: SyncDebtDto[];
 
   @ApiProperty({
     type: [SyncDebtPaymentDto],
-    description: 'دفعات الديون المُسجَّلة أوف‌لاين',
+    description: 'دفعات الديون المُسجَّلة أوف‌لاين (حد أقصى 1000)',
   })
   @IsArray()
+  @ArrayMaxSize(1000, { message: 'لا يمكن مزامنة أكثر من 1000 دفعة في الدفعة الواحدة' })
   @ValidateNested({ each: true })
   @Type(() => SyncDebtPaymentDto)
   debtPayments!: SyncDebtPaymentDto[];

@@ -1,23 +1,20 @@
 import * as dns from 'node:dns';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
+import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
-import { TimingInterceptor } from './common/interceptors/timing.interceptor';
-import type { Request, Response } from 'express';
+import { configureApp } from './bootstrap';
+import { env } from './common/config/env';
 
 dns.setDefaultResultOrder('ipv4first');
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  const httpAdapter = app.getHttpAdapter();
-  httpAdapter.get('/api/health', (_req: Request, res: Response) => {
-    res.status(200).json({ status: 'ok' });
-  });
+  // `bufferLogs: true` queues bootstrap logs until pino is wired below — so
+  // the very first log line is already JSON instead of Nest's default text.
+  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  app.useLogger(app.get(Logger));
 
-  app.setGlobalPrefix('api');
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true }));
-  app.useGlobalInterceptors(new TimingInterceptor());
+  configureApp(app);
 
   const config = new DocumentBuilder()
     .setTitle('واجهة نظام الكاشير')
@@ -39,6 +36,6 @@ async function bootstrap() {
     customSiteTitle: 'توثيق واجهة نظام الكاشير',
   });
 
-  await app.listen(process.env.PORT ?? 3000, '0.0.0.0');
+  await app.listen(env.PORT, '0.0.0.0');
 }
 bootstrap();

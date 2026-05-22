@@ -4,6 +4,7 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { StoreModule } from '../store/store.module';
 import { MailModule } from '../mail/mail.module';
+import { env } from '../../common/config/env';
 
 @Module({
   imports: [
@@ -11,7 +12,7 @@ import { MailModule } from '../mail/mail.module';
     MailModule,
     JwtModule.register({
       global: true,
-      secret: process.env.JWT_SECRET ?? 'dev_secret',
+      secret: env.JWT_SECRET,
       signOptions: { expiresIn: '7d' },
     }),
   ],

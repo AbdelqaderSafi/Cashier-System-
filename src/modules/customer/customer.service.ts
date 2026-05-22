@@ -1,14 +1,16 @@
 import {
   Injectable,
-  ForbiddenException,
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
-import type { Customer, Prisma } from 'generated/prisma/client';
+import type { Customer } from 'generated/prisma/client';
+import { Prisma } from 'generated/prisma/client';
 import { DatabaseService } from '../database/database.service';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { CustomerQueryDto } from './dto/customer-query.dto';
+import { paginate, paginatedResponse } from '../../common/utils/pagination';
+import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
 
 export type PaginatedCustomers = {
   data: Customer[];
@@ -22,20 +24,16 @@ export type PaginatedCustomers = {
 
 @Injectable()
 export class CustomerService {
-  constructor(private readonly db: DatabaseService) {}
-
-  private requireStoreId(storeId: string | null): string {
-    if (!storeId) throw new ForbiddenException('Store context is required for this operation');
-    return storeId;
-  }
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly cacheInvalidator: CacheInvalidationService,
+  ) {}
 
   // ─── Create ──────────────────────────────────────────────────────────────────
 
-  async create(storeId: string | null, dto: CreateCustomerDto): Promise<Customer> {
-    const sid = this.requireStoreId(storeId);
-
-    return this.db.$transaction(async (tx) => {
-      const customer = await tx.customer.create({
+  async create(sid: string, dto: CreateCustomerDto): Promise<Customer> {
+    const customer = await this.db.$transaction(async (tx) => {
+      const created = await tx.customer.create({
         data: {
           name: dto.name,
           phone: dto.phone ?? null,
@@ -52,26 +50,27 @@ export class CustomerService {
             isPaid: false,
             invoiceId: null,
             notes: 'دين سابق - رصيد افتتاحي عند التأسيس',
-            customerId: customer.id,
+            customerId: created.id,
             storeId: sid,
           },
         });
       }
 
-      return customer;
+      return created;
     });
+
+    void this.cacheInvalidator.invalidateStoreData(sid);
+    return customer;
   }
 
   // ─── List (paginated + search) ────────────────────────────────────────────────
 
-  async findAll(storeId: string | null, query: CustomerQueryDto): Promise<PaginatedCustomers> {
-    const sid = this.requireStoreId(storeId);
-    const page = query.page ?? 1;
-    const limit = query.limit ?? 20;
-    const skip = (page - 1) * limit;
+  async findAll(sid: string, query: CustomerQueryDto): Promise<PaginatedCustomers> {
+    const { skip, take, page, limit } = paginate(query);
 
     const where: Prisma.CustomerWhereInput = {
       storeId: sid,
+      isDeleted: false,
     };
 
     if (query.search) {
@@ -86,29 +85,20 @@ export class CustomerService {
         where,
         orderBy: { createdAt: 'desc' },
         skip,
-        take: limit,
+        take,
       }),
       this.db.customer.count({ where }),
     ]);
 
-    return {
-      data,
-      meta: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit),
-      },
-    };
+    return paginatedResponse(data, total, page, limit);
   }
 
   // ─── Find one by ID (with invoices + debts) ───────────────────────────────────
 
-  async findOne(storeId: string | null, id: string) {
-    const sid = this.requireStoreId(storeId);
+  async findOne(sid: string, id: string) {
 
     const customer = await this.db.customer.findFirst({
-      where: { id, storeId: sid },
+      where: { id, storeId: sid, isDeleted: false },
       include: {
         invoices: {
           select: {
@@ -167,31 +157,32 @@ export class CustomerService {
 
   // ─── Update ───────────────────────────────────────────────────────────────────
 
-  async update(storeId: string | null, id: string, dto: UpdateCustomerDto): Promise<Customer> {
-    const sid = this.requireStoreId(storeId);
+  async update(sid: string, id: string, dto: UpdateCustomerDto): Promise<Customer> {
 
     const existing = await this.db.customer.findFirst({
-      where: { id, storeId: sid },
+      where: { id, storeId: sid, isDeleted: false },
       select: { id: true },
     });
     if (!existing) throw new NotFoundException('Customer not found');
 
-    return this.db.customer.update({
+    const updated = await this.db.customer.update({
       where: { id },
       data: {
         ...(dto.name !== undefined && { name: dto.name }),
         ...(dto.phone !== undefined && { phone: dto.phone }),
       },
     });
+
+    void this.cacheInvalidator.invalidateStoreData(sid);
+    return updated;
   }
 
   // ─── Delete ───────────────────────────────────────────────────────────────────
 
-  async remove(storeId: string | null, id: string): Promise<void> {
-    const sid = this.requireStoreId(storeId);
+  async remove(sid: string, id: string): Promise<void> {
 
     const customer = await this.db.customer.findFirst({
-      where: { id, storeId: sid },
+      where: { id, storeId: sid, isDeleted: false },
       select: {
         id: true,
         debts: { select: { id: true, isPaid: true } },
@@ -207,16 +198,23 @@ export class CustomerService {
       );
     }
 
-    await this.db.customer.delete({ where: { id } });
+    // Soft delete (archive): keep historical invoices/debts intact and just hide
+    // the customer from the cashier's UI. Avoids FK constraint violations on
+    // related debts/invoices.
+    await this.db.customer.update({
+      where: { id },
+      data: { isDeleted: true, deletedAt: new Date() },
+    });
+
+    void this.cacheInvalidator.invalidateStoreData(sid);
   }
 
   // ─── Summary: total outstanding debts for a customer ─────────────────────────
 
-  async getDebtSummary(storeId: string | null, id: string) {
-    const sid = this.requireStoreId(storeId);
+  async getDebtSummary(sid: string, id: string) {
 
     const customer = await this.db.customer.findFirst({
-      where: { id, storeId: sid },
+      where: { id, storeId: sid, isDeleted: false },
       select: { id: true, name: true, phone: true },
     });
     if (!customer) throw new NotFoundException('Customer not found');
@@ -235,17 +233,27 @@ export class CustomerService {
       orderBy: { date: 'desc' },
     });
 
-    const totalDebt = debts.reduce((sum, d) => sum + Number(d.amount), 0);
-    const totalPaid = debts.reduce((sum, d) => sum + Number(d.paid), 0);
-    const totalRemaining = debts.reduce((sum, d) => sum + Number(d.remaining), 0);
+    const zero = new Prisma.Decimal(0);
+    const totalDebt = debts.reduce(
+      (acc, d) => acc.plus(new Prisma.Decimal(d.amount)),
+      zero,
+    );
+    const totalPaid = debts.reduce(
+      (acc, d) => acc.plus(new Prisma.Decimal(d.paid)),
+      zero,
+    );
+    const totalRemaining = debts.reduce(
+      (acc, d) => acc.plus(new Prisma.Decimal(d.remaining)),
+      zero,
+    );
     const unpaidCount = debts.filter((d) => !d.isPaid).length;
 
     return {
       customer,
       summary: {
-        totalDebt,
-        totalPaid,
-        totalRemaining,
+        totalDebt: totalDebt.toString(),
+        totalPaid: totalPaid.toString(),
+        totalRemaining: totalRemaining.toString(),
         unpaidCount,
         totalDebts: debts.length,
       },

@@ -1,5 +1,9 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
 import { DatabaseService } from '../database/database.service';
+import { CacheKeys, CacheTtl } from '../../common/cache/cache-keys';
+import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
 
 export interface DailyProfitResult {
   date: string;
@@ -10,12 +14,11 @@ export interface DailyProfitResult {
 
 @Injectable()
 export class ReportsService {
-  constructor(private readonly db: DatabaseService) {}
-
-  private requireStoreId(storeId: string | null): string {
-    if (!storeId) throw new ForbiddenException('Store context is required for this operation');
-    return storeId;
-  }
+  constructor(
+    private readonly db: DatabaseService,
+    @Inject(CACHE_MANAGER) private readonly cache: Cache,
+    private readonly cacheInvalidator: CacheInvalidationService,
+  ) {}
 
   /**
    * Calculates the net profit for a given calendar day.
@@ -27,13 +30,27 @@ export class ReportsService {
    * Both revenue and cost are read from InvoiceItem so historical records
    * are never affected by future price/cost changes on the Product row.
    */
-  async getDailyProfit(storeId: string | null, dateStr?: string): Promise<DailyProfitResult> {
-    const sid = this.requireStoreId(storeId);
-
+  async getDailyProfit(sid: string, dateStr?: string): Promise<DailyProfitResult> {
     // Resolve target date (defaults to today in UTC)
     const target = dateStr ? new Date(dateStr) : new Date();
     const dayStart = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth(), target.getUTCDate(), 0, 0, 0));
     const dayEnd = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth(), target.getUTCDate(), 23, 59, 59, 999));
+
+    // Only cache *past* days — they're immutable. Today is still changing, so
+    // we always re-fetch to avoid stale numbers. Compare day-start UTC vs.
+    // today's day-start UTC.
+    const now = new Date();
+    const todayStart = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+    );
+    const isPastDay = dayStart.getTime() < todayStart.getTime();
+    const dayIso = dayStart.toISOString().slice(0, 10);
+    const cacheKey = CacheKeys.dailyProfit(sid, dayIso);
+
+    if (isPastDay) {
+      const cached = await this.cache.get<DailyProfitResult>(cacheKey);
+      if (cached) return cached;
+    }
 
     // Aggregate directly in the DB for efficiency — one round-trip.
     const result = await this.db.invoiceItem.aggregate({
@@ -64,11 +81,18 @@ export class ReportsService {
     const totalCost = Number(costRows[0]?.total_cost ?? 0);
     const netProfit = +(totalRevenue - totalCost).toFixed(2);
 
-    return {
-      date: dayStart.toISOString().slice(0, 10),
+    const dailyProfit: DailyProfitResult = {
+      date: dayIso,
       totalRevenue: +totalRevenue.toFixed(2),
       totalCost: +totalCost.toFixed(2),
       netProfit,
     };
+
+    if (isPastDay) {
+      await this.cache.set(cacheKey, dailyProfit, CacheTtl.DAILY_PROFIT_PAST);
+      this.cacheInvalidator.trackDailyProfitKey(sid, dayIso);
+    }
+
+    return dailyProfit;
   }
 }

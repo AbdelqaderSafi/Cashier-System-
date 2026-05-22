@@ -26,13 +26,13 @@ import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { CustomerQueryDto } from './dto/customer-query.dto';
 import { JwtGuard } from '../../common/guards/jwt.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { TenantGuard } from '../../common/guards/tenant.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import type { JwtPayload } from '../../common/decorators/current-user.decorator';
+import { StoreId } from '../../common/decorators/store-id.decorator';
 
 @ApiTags('العملاء')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtGuard, RolesGuard)
+@UseGuards(JwtGuard, TenantGuard, RolesGuard)
 @Controller('customers')
 export class CustomerController {
   constructor(private readonly customerService: CustomerService) {}
@@ -42,8 +42,8 @@ export class CustomerController {
   @ApiOperation({ summary: 'إنشاء عميل جديد في المتجر الحالي (للمدير فقط)' })
   @ApiResponse({ status: 201, description: 'تم إنشاء العميل بنجاح' })
   @ApiResponse({ status: 403, description: 'ممنوع — مطلوب دور ADMIN' })
-  create(@CurrentUser() user: JwtPayload, @Body() dto: CreateCustomerDto) {
-    return this.customerService.create(user.storeId, dto);
+  create(@StoreId() sid: string, @Body() dto: CreateCustomerDto) {
+    return this.customerService.create(sid, dto);
   }
 
   @Get()
@@ -53,8 +53,8 @@ export class CustomerController {
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1, description: 'رقم الصفحة' })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 20, description: 'عدد العناصر لكل صفحة' })
   @ApiResponse({ status: 200, description: 'قائمة عملاء مُرقّمة' })
-  findAll(@CurrentUser() user: JwtPayload, @Query() query: CustomerQueryDto) {
-    return this.customerService.findAll(user.storeId, query);
+  findAll(@StoreId() sid: string, @Query() query: CustomerQueryDto) {
+    return this.customerService.findAll(sid, query);
   }
 
   @Get(':id')
@@ -63,8 +63,8 @@ export class CustomerController {
   @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف العميل' })
   @ApiResponse({ status: 200, description: 'العميل مع فواتيره وديونه' })
   @ApiResponse({ status: 404, description: 'العميل غير موجود' })
-  findOne(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
-    return this.customerService.findOne(user.storeId, id);
+  findOne(@StoreId() sid: string, @Param('id', ParseUUIDPipe) id: string) {
+    return this.customerService.findOne(sid, id);
   }
 
   @Get(':id/debt-summary')
@@ -73,8 +73,8 @@ export class CustomerController {
   @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف العميل' })
   @ApiResponse({ status: 200, description: 'ملخص ديون العميل' })
   @ApiResponse({ status: 404, description: 'العميل غير موجود' })
-  getDebtSummary(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
-    return this.customerService.getDebtSummary(user.storeId, id);
+  getDebtSummary(@StoreId() sid: string, @Param('id', ParseUUIDPipe) id: string) {
+    return this.customerService.getDebtSummary(sid, id);
   }
 
   @Patch(':id')
@@ -84,11 +84,11 @@ export class CustomerController {
   @ApiResponse({ status: 200, description: 'تم تحديث العميل' })
   @ApiResponse({ status: 404, description: 'العميل غير موجود' })
   update(
-    @CurrentUser() user: JwtPayload,
+    @StoreId() sid: string,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateCustomerDto,
   ) {
-    return this.customerService.update(user.storeId, id, dto);
+    return this.customerService.update(sid, id, dto);
   }
 
   @Delete(':id')
@@ -102,7 +102,7 @@ export class CustomerController {
   @ApiResponse({ status: 204, description: 'تم حذف العميل' })
   @ApiResponse({ status: 400, description: 'لا يمكن الحذف — يوجد ديون غير مسددة' })
   @ApiResponse({ status: 404, description: 'العميل غير موجود' })
-  async remove(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
-    await this.customerService.remove(user.storeId, id);
+  async remove(@StoreId() sid: string, @Param('id', ParseUUIDPipe) id: string) {
+    await this.customerService.remove(sid, id);
   }
 }

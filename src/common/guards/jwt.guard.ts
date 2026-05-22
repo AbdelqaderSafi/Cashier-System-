@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
+import { env } from '../config/env';
 
 @Injectable()
 export class JwtGuard implements CanActivate {
@@ -19,7 +20,7 @@ export class JwtGuard implements CanActivate {
 
     try {
       const payload = await this.jwt.verifyAsync(token, {
-        secret: process.env.JWT_SECRET ?? 'dev_secret',
+        secret: env.JWT_SECRET,
       });
       request['user'] = payload;
     } catch {

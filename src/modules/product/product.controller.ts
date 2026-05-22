@@ -26,13 +26,13 @@ import { UpdateProductDto } from './dto/update-product.dto';
 import { ProductQueryDto } from './dto/product-query.dto';
 import { JwtGuard } from '../../common/guards/jwt.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { TenantGuard } from '../../common/guards/tenant.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import type { JwtPayload } from '../../common/decorators/current-user.decorator';
+import { StoreId } from '../../common/decorators/store-id.decorator';
 
 @ApiTags('المنتجات')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtGuard, RolesGuard)
+@UseGuards(JwtGuard, TenantGuard, RolesGuard)
 @Controller('products')
 export class ProductController {
   constructor(private readonly productService: ProductService) {}
@@ -43,8 +43,8 @@ export class ProductController {
   @ApiResponse({ status: 201, description: 'تم إنشاء المنتج بنجاح' })
   @ApiResponse({ status: 409, description: 'الباركود موجود مسبقاً في هذا المتجر' })
   @ApiResponse({ status: 403, description: 'ممنوع — مطلوب دور ADMIN' })
-  create(@CurrentUser() user: JwtPayload, @Body() dto: CreateProductDto) {
-    return this.productService.create(user.storeId, dto);
+  create(@StoreId() sid: string, @Body() dto: CreateProductDto) {
+    return this.productService.create(sid, dto);
   }
 
   @Get()
@@ -62,8 +62,8 @@ export class ProductController {
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1, description: 'رقم الصفحة' })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 20, description: 'عدد العناصر لكل صفحة' })
   @ApiResponse({ status: 200, description: 'قائمة منتجات مُرقّمة' })
-  findAll(@CurrentUser() user: JwtPayload, @Query() query: ProductQueryDto) {
-    return this.productService.findAll(user.storeId, query);
+  findAll(@StoreId() sid: string, @Query() query: ProductQueryDto) {
+    return this.productService.findAll(sid, query);
   }
 
   @Get('low-stock')
@@ -72,8 +72,8 @@ export class ProductController {
     summary: 'المنتجات النشطة التي انخفض مخزونها عن حد التنبيه minStock (للمدير فقط)',
   })
   @ApiResponse({ status: 200, description: 'قائمة منتجات قليلة المخزون مرتبة تصاعدياً حسب الكمية' })
-  findLowStock(@CurrentUser() user: JwtPayload) {
-    return this.productService.findLowStock(user.storeId);
+  findLowStock(@StoreId() sid: string) {
+    return this.productService.findLowStock(sid);
   }
 
   @Get('barcode/:barcode')
@@ -82,8 +82,8 @@ export class ProductController {
   @ApiParam({ name: 'barcode', description: 'نص الباركود', example: '6001234567890' })
   @ApiResponse({ status: 200, description: 'تم العثور على المنتج' })
   @ApiResponse({ status: 404, description: 'لا يوجد منتج نشط بهذا الباركود' })
-  findByBarcode(@CurrentUser() user: JwtPayload, @Param('barcode') barcode: string) {
-    return this.productService.findByBarcode(user.storeId, barcode);
+  findByBarcode(@StoreId() sid: string, @Param('barcode') barcode: string) {
+    return this.productService.findByBarcode(sid, barcode);
   }
 
   @Get(':id')
@@ -92,8 +92,8 @@ export class ProductController {
   @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف المنتج' })
   @ApiResponse({ status: 200, description: 'المنتج مع سجل مبيعات حديث' })
   @ApiResponse({ status: 404, description: 'المنتج غير موجود' })
-  findOne(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
-    return this.productService.findOne(user.storeId, id);
+  findOne(@StoreId() sid: string, @Param('id', ParseUUIDPipe) id: string) {
+    return this.productService.findOne(sid, id);
   }
 
   @Patch(':id')
@@ -106,11 +106,11 @@ export class ProductController {
   @ApiResponse({ status: 404, description: 'المنتج غير موجود' })
   @ApiResponse({ status: 409, description: 'الباركود مُستخدم لمنتج آخر' })
   update(
-    @CurrentUser() user: JwtPayload,
+    @StoreId() sid: string,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateProductDto,
   ) {
-    return this.productService.update(user.storeId, id, dto);
+    return this.productService.update(sid, id, dto);
   }
 
   @Delete(':id')
@@ -123,7 +123,7 @@ export class ProductController {
   @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف المنتج' })
   @ApiResponse({ status: 204, description: 'تم حذف المنتج' })
   @ApiResponse({ status: 404, description: 'المنتج غير موجود' })
-  async remove(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
-    await this.productService.remove(user.storeId, id);
+  async remove(@StoreId() sid: string, @Param('id', ParseUUIDPipe) id: string) {
+    await this.productService.remove(sid, id);
   }
 }

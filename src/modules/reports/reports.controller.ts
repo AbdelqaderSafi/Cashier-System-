@@ -10,9 +10,9 @@ import { IsDateString, IsOptional } from 'class-validator';
 import { ReportsService } from './reports.service';
 import { JwtGuard } from '../../common/guards/jwt.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { TenantGuard } from '../../common/guards/tenant.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import type { JwtPayload } from '../../common/decorators/current-user.decorator';
+import { StoreId } from '../../common/decorators/store-id.decorator';
 
 class DailyProfitQueryDto {
   @IsOptional()
@@ -22,7 +22,7 @@ class DailyProfitQueryDto {
 
 @ApiTags('التقارير')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtGuard, RolesGuard)
+@UseGuards(JwtGuard, TenantGuard, RolesGuard)
 @Controller('reports')
 export class ReportsController {
   constructor(private readonly reportsService: ReportsService) {}
@@ -54,7 +54,7 @@ export class ReportsController {
     },
   })
   @ApiResponse({ status: 403, description: 'ممنوع — مطلوب دور ADMIN' })
-  getDailyProfit(@CurrentUser() user: JwtPayload, @Query() query: DailyProfitQueryDto) {
-    return this.reportsService.getDailyProfit(user.storeId, query.date);
+  getDailyProfit(@StoreId() sid: string, @Query() query: DailyProfitQueryDto) {
+    return this.reportsService.getDailyProfit(sid, query.date);
   }
 }

@@ -8,14 +8,22 @@ export class TimingInterceptor implements NestInterceptor {
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
     const req = context.switchToHttp().getRequest();
-    const { method, url } = req;
+    const { method } = req;
+    const path = (req.route?.path as string | undefined) ?? req.originalUrl?.split('?')[0] ?? req.url;
 
     const now = Date.now();
 
     return next.handle().pipe(
-      tap(() => {
-        const delay = Date.now() - now;
-        this.logger.log(`${method} ${url} - ${delay}ms`);
+      tap({
+        next: () => {
+          const delay = Date.now() - now;
+          this.logger.log(`${method} ${path} - ${delay}ms`);
+        },
+        error: (err) => {
+          const delay = Date.now() - now;
+          const status = err?.status ?? 500;
+          this.logger.warn(`${method} ${path} - ${status} - ${delay}ms`);
+        },
       }),
     );
   }

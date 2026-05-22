@@ -3,6 +3,7 @@ import {
   UnauthorizedException,
   NotFoundException,
   BadRequestException,
+  ConflictException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
@@ -31,6 +32,21 @@ export class AuthService {
   ) {}
 
   async register(dto: RegisterDTO): Promise<RegisterResponseDTO> {
+    // Pre-flight email-uniqueness check. The DB unique index on User.email
+    // would catch a collision anyway (as P2002 → 409 via PrismaExceptionFilter),
+    // but the up-front check
+    //   1. avoids the wasted work of generating a subdomain + creating a
+    //      Store row inside a transaction that's destined to roll back,
+    //   2. lets us return a clear Arabic message instead of the generic
+    //      "سجل مكرر" produced by the DB error mapper.
+    const existing = await this.db.user.findUnique({
+      where: { email: dto.email },
+      select: { id: true },
+    });
+    if (existing) {
+      throw new ConflictException('البريد الإلكتروني مسجَّل مسبقاً');
+    }
+
     const subdomain = await this.storeService.generateUniqueSubdomain(dto.name);
 
     const hashedPassword = await bcrypt.hash(dto.password, 10);

@@ -1,14 +1,16 @@
 import {
   Injectable,
-  ForbiddenException,
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
-import type { Invoice, Prisma } from 'generated/prisma/client';
+import type { Invoice } from 'generated/prisma/client';
+import { Prisma } from 'generated/prisma/client';
 import { DatabaseService } from '../database/database.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { UpdateInvoiceDto } from './dto/update-invoice.dto';
 import { InvoiceQueryDto } from './dto/invoice-query.dto';
+import { paginate, paginatedResponse } from '../../common/utils/pagination';
+import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
 
 export type PaginatedInvoices = {
   data: Invoice[];
@@ -22,18 +24,25 @@ export type PaginatedInvoices = {
 
 @Injectable()
 export class InvoiceService {
-  constructor(private readonly db: DatabaseService) {}
-
-  private requireStoreId(storeId: string | null): string {
-    if (!storeId) throw new ForbiddenException('Store context is required for this operation');
-    return storeId;
-  }
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly cacheInvalidator: CacheInvalidationService,
+  ) {}
 
   // ─── Create Invoice ────────────────────────────────────────────────────────────
+  //
+  // Atomicity:    one $transaction wraps stock deduction, invoice insert, and
+  //               (optionally) debt creation. Any failure rolls back the lot.
+  // Stock safety: a single conditional UPDATE deducts every line at once and
+  //               refuses to go negative — protects against the TOCTOU race
+  //               between "check stock" and "decrement stock" under load
+  //               (last-item-in-stock sold twice).
+  // Numbering:    `lastInvoiceNumber` on Store is incremented atomically — the
+  //               classic `MAX(number)+1` would let two concurrent invoices
+  //               grab the same number under a unique-index race.
+  // Money:        all arithmetic uses Prisma.Decimal — no .toFixed round-trips.
 
-  async create(storeId: string | null, dto: CreateInvoiceDto): Promise<Invoice> {
-    const sid = this.requireStoreId(storeId);
-
+  async create(sid: string, dto: CreateInvoiceDto): Promise<Invoice> {
     if (!dto.items || dto.items.length === 0) {
       throw new BadRequestException('الفاتورة يجب أن تحتوي على بند واحد على الأقل');
     }
@@ -52,7 +61,7 @@ export class InvoiceService {
 
     if (customerId) {
       const customer = await this.db.customer.findFirst({
-        where: { id: customerId, storeId: sid },
+        where: { id: customerId, storeId: sid, isDeleted: false },
         select: { id: true },
       });
       if (!customer) throw new NotFoundException('العميل غير موجود');
@@ -66,25 +75,19 @@ export class InvoiceService {
     if (products.length !== productIds.length) {
       const foundIds = new Set(products.map((p) => p.id));
       const missing = productIds.filter((id) => !foundIds.has(id));
-      throw new NotFoundException(`المنتجات التالية غير موجودة أو غير نشطة: ${missing.join(', ')}`);
+      throw new NotFoundException(
+        `المنتجات التالية غير موجودة أو غير نشطة: ${missing.join(', ')}`,
+      );
     }
 
     const productMap = new Map(products.map((p) => [p.id, p]));
 
-    for (const item of dto.items) {
-      const product = productMap.get(item.productId)!;
-      if (product.stock < item.quantity) {
-        throw new BadRequestException(
-          `الكمية المطلوبة (${item.quantity}) من "${product.name}" تتجاوز المخزون المتوفر (${product.stock})`,
-        );
-      }
-    }
-
+    // Build invoice items with Decimal arithmetic — no float drift.
     const invoiceItems = dto.items.map((item) => {
       const product = productMap.get(item.productId)!;
-      const price = Number(product.price);
-      const unitCost = Number(product.wholesalePrice);
-      const itemTotal = +(price * item.quantity).toFixed(2);
+      const price = new Prisma.Decimal(product.price);
+      const unitCost = new Prisma.Decimal(product.wholesalePrice);
+      const itemTotal = price.times(item.quantity);
       return {
         productName: product.name,
         barcode: product.barcode,
@@ -96,100 +99,149 @@ export class InvoiceService {
       };
     });
 
-    const total = +invoiceItems.reduce((sum, item) => sum + item.total, 0).toFixed(2);
+    const total = invoiceItems.reduce(
+      (acc, item) => acc.plus(item.total),
+      new Prisma.Decimal(0),
+    );
 
-    let paid: number;
-    let remaining: number;
+    let paid: Prisma.Decimal;
+    let remaining: Prisma.Decimal;
 
     switch (dto.paymentMethod) {
       case 'CASH':
       case 'ONLINE':
-        // بيع مباشر — مدفوع بالكامل
         paid = total;
-        remaining = 0;
+        remaining = new Prisma.Decimal(0);
         break;
       case 'DEBT':
-        // آجل بالكامل — المبلغ الكامل دين
-        paid = 0;
+        paid = new Prisma.Decimal(0);
         remaining = total;
         break;
       case 'PARTIAL': {
-        // جزئي — الكاشير يحدد المبلغ المدفوع والباقي يصبح دين
-        const paidAmount = dto.paid!;
-        if (paidAmount >= total) {
+        const paidAmount = new Prisma.Decimal(dto.paid!);
+        if (paidAmount.gte(total)) {
           throw new BadRequestException(
             'المبلغ المدفوع يجب أن يكون أقل من إجمالي الفاتورة عند الدفع الجزئي',
           );
         }
-        if (paidAmount <= 0) {
+        if (paidAmount.lte(0)) {
           throw new BadRequestException('المبلغ المدفوع يجب أن يكون أكبر من صفر');
         }
         paid = paidAmount;
-        remaining = +(total - paidAmount).toFixed(2);
+        remaining = total.minus(paidAmount);
         break;
       }
       default:
         paid = total;
-        remaining = 0;
+        remaining = new Prisma.Decimal(0);
     }
 
-    return this.db.$transaction(async (tx) => {
-      const lastInvoice = await tx.invoice.findFirst({
-        where: { storeId: sid },
-        orderBy: { number: 'desc' },
-        select: { number: true },
-      });
-      const nextNumber = (lastInvoice?.number ?? 0) + 1;
+    const invoice = await this.db.$transaction(
+      async (tx) => {
+        // 1) Atomic stock deduction — single conditional UPDATE that refuses
+        //    to go negative. Returns the number of rows updated; if any line
+        //    couldn't be deducted (insufficient stock or product gone), we
+        //    bail out and the transaction rolls back.
+        // Per-item conditional updateMany — each one is a single atomic
+        // UPDATE on the row with a `stock >= qty` predicate, so two concurrent
+        // sales of the last unit can't both pass.
+        for (const item of dto.items) {
+          const { count } = await tx.product.updateMany({
+            where: {
+              id: item.productId,
+              storeId: sid,
+              isActive: true,
+              stock: { gte: item.quantity },
+            },
+            data: { stock: { decrement: item.quantity } },
+          });
+          if (count === 0) {
+            // Diagnose why the conditional failed.
+            const p = productMap.get(item.productId);
+            const live = await tx.product.findFirst({
+              where: { id: item.productId, storeId: sid },
+              select: { stock: true, name: true, isActive: true },
+            });
+            if (!live || !live.isActive) {
+              throw new BadRequestException(
+                `المنتج "${p?.name ?? item.productId}" غير متوفر أو معطّل`,
+              );
+            }
+            throw new BadRequestException(
+              `الكمية المطلوبة (${item.quantity}) من "${live.name}" تتجاوز المخزون المتوفر (${live.stock})`,
+            );
+          }
+        }
 
-      const invoice = await tx.invoice.create({
-        data: {
-          number: nextNumber,
-          total,
-          paid,
-          remaining,
-          paymentMethod: dto.paymentMethod,
-          notes: dto.notes ?? null,
-          customerId,
-          storeId: sid,
-          items: {
-            create: invoiceItems,
-          },
-        },
-        include: {
-          items: true,
-          customer: { select: { id: true, name: true, phone: true } },
-        },
-      });
-
-      for (const item of dto.items) {
-        await tx.product.update({
-          where: { id: item.productId },
-          data: { stock: { decrement: item.quantity } },
+        // 2) Atomic invoice-number allocation — increment the store counter
+        //    and use the returned value.
+        const store = await tx.store.update({
+          where: { id: sid },
+          data: { lastInvoiceNumber: { increment: 1 } },
+          select: { lastInvoiceNumber: true },
         });
-      }
+        const nextNumber = store.lastInvoiceNumber;
 
-      if (needsCustomer) {
-        await tx.debt.create({
+        // 3) Insert invoice + items.
+        const invoice = await tx.invoice.create({
           data: {
-            amount: remaining,
-            paid: 0,
+            number: nextNumber,
+            total,
+            paid,
             remaining,
-            customerId: customerId!,
-            invoiceId: invoice.id,
+            paymentMethod: dto.paymentMethod,
+            notes: dto.notes ?? null,
+            customerId,
             storeId: sid,
+            items: {
+              create: invoiceItems,
+            },
+          },
+          include: {
+            items: true,
+            customer: { select: { id: true, name: true, phone: true } },
           },
         });
-      }
 
-      return invoice;
-    });
+        // 4) Optional linked debt for DEBT / PARTIAL.
+        if (needsCustomer) {
+          await tx.debt.create({
+            data: {
+              amount: remaining,
+              paid: new Prisma.Decimal(0),
+              remaining,
+              customerId: customerId!,
+              invoiceId: invoice.id,
+              storeId: sid,
+            },
+          });
+        }
+
+        return invoice;
+      },
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        // Concurrent invoice creates serialise on the Store row's
+        // lastInvoiceNumber increment — give the queue room to drain instead
+        // of falling off Prisma's 2s default.
+        maxWait: 10_000,
+        timeout: 30_000,
+      },
+    );
+
+    void this.cacheInvalidator.invalidateStoreData(sid);
+    return invoice;
   }
 
   // ─── Update Invoice ────────────────────────────────────────────────────────────
+  //
+  // Concurrency: when the items list changes, restores old stock and deducts
+  //              new stock atomically via single conditional SQL statements
+  //              (no per-row TOCTOU window). When a debt row exists it is
+  //              locked via SELECT FOR UPDATE before reading `paid`.
+  // Money:       all arithmetic uses Prisma.Decimal.
 
-  async update(storeId: string | null, id: string, dto: UpdateInvoiceDto): Promise<Invoice> {
-    const sid = this.requireStoreId(storeId);
-
+  async update(sid: string, id: string, dto: UpdateInvoiceDto): Promise<Invoice> {
     // 1. Fetch current invoice with full details
     const invoice = await this.db.invoice.findFirst({
       where: { id, storeId: sid },
@@ -230,7 +282,7 @@ export class InvoiceService {
 
     if (customerId) {
       const customer = await this.db.customer.findFirst({
-        where: { id: customerId, storeId: sid },
+        where: { id: customerId, storeId: sid, isDeleted: false },
         select: { id: true },
       });
       if (!customer) throw new NotFoundException('العميل غير موجود');
@@ -240,14 +292,15 @@ export class InvoiceService {
     type NewItem = {
       productName: string;
       barcode: string | null;
-      price: number;
+      price: Prisma.Decimal;
+      unitCost: Prisma.Decimal;
       quantity: number;
-      total: number;
+      total: Prisma.Decimal;
       productId: string;
     };
 
     let newInvoiceItems: NewItem[] | null = null;
-    let total: number = Number(invoice.total);
+    let total: Prisma.Decimal = new Prisma.Decimal(invoice.total);
 
     if (dto.items !== undefined) {
       if (dto.items.length === 0) {
@@ -271,9 +324,9 @@ export class InvoiceService {
 
       newInvoiceItems = dto.items.map((item) => {
         const product = productMap.get(item.productId)!;
-        const price = Number(product.price);
-        const unitCost = Number(product.wholesalePrice);
-        const itemTotal = +(price * item.quantity).toFixed(2);
+        const price = new Prisma.Decimal(product.price);
+        const unitCost = new Prisma.Decimal(product.wholesalePrice);
+        const itemTotal = price.times(item.quantity);
         return {
           productName: product.name,
           barcode: product.barcode ?? null,
@@ -285,42 +338,47 @@ export class InvoiceService {
         };
       });
 
-      total = +newInvoiceItems.reduce((sum, item) => sum + item.total, 0).toFixed(2);
+      total = newInvoiceItems.reduce(
+        (acc, item) => acc.plus(item.total),
+        new Prisma.Decimal(0),
+      );
     }
 
     // 5. Calculate paid / remaining
-    let paid: number;
-    let remaining: number;
+    let paid: Prisma.Decimal;
+    let remaining: Prisma.Decimal;
 
     switch (paymentMethod) {
       case 'CASH':
       case 'ONLINE':
         paid = total;
-        remaining = 0;
+        remaining = new Prisma.Decimal(0);
         break;
       case 'DEBT':
-        paid = 0;
+        paid = new Prisma.Decimal(0);
         remaining = total;
         break;
       case 'PARTIAL': {
         // Use the provided paid amount or fall back to the invoice's existing paid amount
         const paidAmount =
-          dto.paid !== undefined ? dto.paid : Number(invoice.paid);
-        if (paidAmount >= total) {
+          dto.paid !== undefined
+            ? new Prisma.Decimal(dto.paid)
+            : new Prisma.Decimal(invoice.paid);
+        if (paidAmount.gte(total)) {
           throw new BadRequestException(
             'المبلغ المدفوع يجب أن يكون أقل من إجمالي الفاتورة عند الدفع الجزئي',
           );
         }
-        if (paidAmount <= 0) {
+        if (paidAmount.lte(0)) {
           throw new BadRequestException('المبلغ المدفوع يجب أن يكون أكبر من صفر');
         }
         paid = paidAmount;
-        remaining = +(total - paidAmount).toFixed(2);
+        remaining = total.minus(paidAmount);
         break;
       }
       default:
         paid = total;
-        remaining = 0;
+        remaining = new Prisma.Decimal(0);
     }
 
     // 6. Debt constraints
@@ -335,121 +393,163 @@ export class InvoiceService {
 
     if (wasDebt && needsCustomer && invoice.debt) {
       // Updating existing debt: new remaining must not be less than payments already made
-      const alreadyPaidOnDebt = Number(invoice.debt.paid);
-      if (remaining < alreadyPaidOnDebt) {
+      const alreadyPaidOnDebt = new Prisma.Decimal(invoice.debt.paid);
+      if (remaining.lt(alreadyPaidOnDebt)) {
         throw new BadRequestException(
-          `لا يمكن تعديل الفاتورة — المبلغ المتبقي الجديد (${remaining}) أقل مما تم دفعه فعلاً على الدين (${alreadyPaidOnDebt})`,
+          `لا يمكن تعديل الفاتورة — المبلغ المتبقي الجديد (${remaining.toString()}) أقل مما تم دفعه فعلاً على الدين (${alreadyPaidOnDebt.toString()})`,
         );
       }
     }
 
     // 7. Execute everything in a single transaction
-    return this.db.$transaction(async (tx) => {
-      if (newInvoiceItems !== null) {
-        // a. Restore stock for all OLD items
-        for (const oldItem of invoice.items) {
-          if (oldItem.productId) {
-            await tx.product.update({
-              where: { id: oldItem.productId },
-              data: { stock: { increment: oldItem.quantity } },
+    const result = await this.db.$transaction(
+      async (tx) => {
+        if (newInvoiceItems !== null) {
+          // a. Restore stock for all OLD items in one atomic UPDATE.
+          // a. Restore stock for all OLD items. updateMany per item — each
+          //    one is a single atomic UPDATE.
+          for (const oldItem of invoice.items) {
+            if (oldItem.productId) {
+              await tx.product.updateMany({
+                where: { id: oldItem.productId, storeId: sid },
+                data: { stock: { increment: oldItem.quantity } },
+              });
+            }
+          }
+
+          // b. Atomic conditional deduction for the NEW items. If any line
+          //    can't be deducted, the failed-row count diverges from the
+          //    expected count and we diagnose the cause for a friendly error.
+          // b. Atomic per-item conditional deduction for the NEW items.
+          for (const newItem of newInvoiceItems) {
+            const { count } = await tx.product.updateMany({
+              where: {
+                id: newItem.productId,
+                storeId: sid,
+                isActive: true,
+                stock: { gte: newItem.quantity },
+              },
+              data: { stock: { decrement: newItem.quantity } },
             });
+            if (count === 0) {
+              const live = await tx.product.findFirst({
+                where: { id: newItem.productId, storeId: sid },
+                select: { stock: true, name: true, isActive: true },
+              });
+              if (!live || !live.isActive) {
+                throw new BadRequestException(
+                  `المنتج "${newItem.productName}" غير متوفر أو معطّل`,
+                );
+              }
+              throw new BadRequestException(
+                `الكمية المطلوبة (${newItem.quantity}) من "${newItem.productName}" تتجاوز المخزون المتوفر (${live.stock})`,
+              );
+            }
           }
         }
 
-        // b. Check stock availability and deduct for NEW items
-        for (const newItem of newInvoiceItems) {
-          const product = await tx.product.findUnique({
-            where: { id: newItem.productId },
-            select: { stock: true, name: true },
+        // c. Update the invoice (replace items if provided)
+        const updatedInvoice = await tx.invoice.update({
+          where: { id },
+          data: {
+            paymentMethod,
+            total,
+            paid,
+            remaining,
+            customerId,
+            notes: dto.notes !== undefined ? (dto.notes ?? null) : invoice.notes,
+            ...(newInvoiceItems !== null && {
+              items: {
+                deleteMany: {},
+                create: newInvoiceItems,
+              },
+            }),
+          },
+          include: {
+            items: true,
+            customer: { select: { id: true, name: true, phone: true } },
+            debt: {
+              select: {
+                id: true,
+                amount: true,
+                paid: true,
+                remaining: true,
+                isPaid: true,
+              },
+            },
+          },
+        });
+
+        // d. Handle debt record changes — when modifying an existing debt
+        //    row, lock it first so a concurrent debt-payment can't interleave.
+        if (wasDebt && !needsCustomer) {
+          // DEBT/PARTIAL → CASH/ONLINE: delete the debt (validated above: no payments)
+          if (invoice.debt) {
+            await tx.debt.delete({ where: { id: invoice.debt.id } });
+          }
+        } else if (!wasDebt && needsCustomer) {
+          // CASH/ONLINE → DEBT/PARTIAL: create a new debt
+          await tx.debt.create({
+            data: {
+              amount: remaining,
+              paid: new Prisma.Decimal(0),
+              remaining,
+              customerId: customerId!,
+              invoiceId: id,
+              storeId: sid,
+            },
           });
-          if (!product || product.stock < newItem.quantity) {
+        } else if (wasDebt && needsCustomer && invoice.debt) {
+          // DEBT/PARTIAL → DEBT/PARTIAL: lock and update existing debt.
+          const lockedDebtRows = await tx.$queryRaw<
+            { id: string; paid: Prisma.Decimal }[]
+          >`
+            SELECT id, paid
+            FROM debts
+            WHERE id = ${invoice.debt.id}
+              AND "storeId" = ${sid}
+            FOR UPDATE
+          `;
+          if (lockedDebtRows.length === 0) {
+            throw new NotFoundException('الدين المرتبط بالفاتورة غير موجود');
+          }
+          const alreadyPaid = new Prisma.Decimal(lockedDebtRows[0].paid);
+          // Re-check after locking — a payment could have landed between the
+          // initial read and the lock.
+          if (remaining.lt(alreadyPaid)) {
             throw new BadRequestException(
-              `الكمية المطلوبة (${newItem.quantity}) من "${newItem.productName}" تتجاوز المخزون المتوفر (${product?.stock ?? 0})`,
+              `لا يمكن تعديل الفاتورة — المبلغ المتبقي الجديد (${remaining.toString()}) أقل مما تم دفعه فعلاً على الدين (${alreadyPaid.toString()})`,
             );
           }
-          await tx.product.update({
-            where: { id: newItem.productId },
-            data: { stock: { decrement: newItem.quantity } },
+          const newDebtRemaining = remaining.minus(alreadyPaid);
+          await tx.debt.update({
+            where: { id: invoice.debt.id },
+            data: {
+              amount: remaining,
+              remaining: Prisma.Decimal.max(newDebtRemaining, new Prisma.Decimal(0)),
+              isPaid: newDebtRemaining.lte(0),
+              customerId: customerId!,
+            },
           });
         }
-      }
 
-      // c. Update the invoice (replace items if provided)
-      const updatedInvoice = await tx.invoice.update({
-        where: { id },
-        data: {
-          paymentMethod,
-          total,
-          paid,
-          remaining,
-          customerId,
-          notes: dto.notes !== undefined ? (dto.notes ?? null) : invoice.notes,
-          ...(newInvoiceItems !== null && {
-            items: {
-              deleteMany: {},
-              create: newInvoiceItems,
-            },
-          }),
-        },
-        include: {
-          items: true,
-          customer: { select: { id: true, name: true, phone: true } },
-          debt: {
-            select: {
-              id: true,
-              amount: true,
-              paid: true,
-              remaining: true,
-              isPaid: true,
-            },
-          },
-        },
-      });
+        return updatedInvoice;
+      },
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        maxWait: 10_000,
+        timeout: 30_000,
+      },
+    );
 
-      // d. Handle debt record changes
-      if (wasDebt && !needsCustomer) {
-        // DEBT/PARTIAL → CASH/ONLINE: delete the debt (validated above: no payments)
-        if (invoice.debt) {
-          await tx.debt.delete({ where: { id: invoice.debt.id } });
-        }
-      } else if (!wasDebt && needsCustomer) {
-        // CASH/ONLINE → DEBT/PARTIAL: create a new debt
-        await tx.debt.create({
-          data: {
-            amount: remaining,
-            paid: 0,
-            remaining,
-            customerId: customerId!,
-            invoiceId: id,
-            storeId: sid,
-          },
-        });
-      } else if (wasDebt && needsCustomer && invoice.debt) {
-        // DEBT/PARTIAL → DEBT/PARTIAL: update existing debt
-        const alreadyPaid = Number(invoice.debt.paid);
-        const newDebtRemaining = +(remaining - alreadyPaid).toFixed(2);
-        await tx.debt.update({
-          where: { id: invoice.debt.id },
-          data: {
-            amount: remaining,
-            remaining: Math.max(newDebtRemaining, 0),
-            isPaid: newDebtRemaining <= 0,
-            customerId: customerId!,
-          },
-        });
-      }
-
-      return updatedInvoice;
-    });
+    void this.cacheInvalidator.invalidateStoreData(sid);
+    return result;
   }
 
   // ─── List (paginated + filtered) ─────────────────────────────────────────────
 
-  async findAll(storeId: string | null, query: InvoiceQueryDto): Promise<PaginatedInvoices> {
-    const sid = this.requireStoreId(storeId);
-    const page = query.page ?? 1;
-    const limit = query.limit ?? 20;
-    const skip = (page - 1) * limit;
+  async findAll(sid: string, query: InvoiceQueryDto): Promise<PaginatedInvoices> {
+    const { skip, take, page, limit } = paginate(query);
 
     const where: Prisma.InvoiceWhereInput = { storeId: sid };
 
@@ -487,26 +587,17 @@ export class InvoiceService {
         },
         orderBy: { date: 'desc' },
         skip,
-        take: limit,
+        take,
       }),
       this.db.invoice.count({ where }),
     ]);
 
-    return {
-      data,
-      meta: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit),
-      },
-    };
+    return paginatedResponse(data, total, page, limit);
   }
 
   // ─── Find one by ID ──────────────────────────────────────────────────────────
 
-  async findOne(storeId: string | null, id: string) {
-    const sid = this.requireStoreId(storeId);
+  async findOne(sid: string, id: string) {
 
     const invoice = await this.db.invoice.findFirst({
       where: { id, storeId: sid },
@@ -546,8 +637,7 @@ export class InvoiceService {
 
   // ─── Find by invoice number ──────────────────────────────────────────────────
 
-  async findByNumber(storeId: string | null, invoiceNumber: number) {
-    const sid = this.requireStoreId(storeId);
+  async findByNumber(sid: string, invoiceNumber: number) {
 
     const invoice = await this.db.invoice.findFirst({
       where: { number: invoiceNumber, storeId: sid },
@@ -587,8 +677,7 @@ export class InvoiceService {
 
   // ─── Daily Sales Summary ─────────────────────────────────────────────────────
 
-  async getDailySales(storeId: string | null, dateStr?: string) {
-    const sid = this.requireStoreId(storeId);
+  async getDailySales(sid: string, dateStr?: string) {
 
     const target = dateStr ? new Date(dateStr) : new Date();
     const startOfDay = new Date(target);
@@ -614,27 +703,36 @@ export class InvoiceService {
       orderBy: { date: 'desc' },
     });
 
-    const totalSales = invoices.reduce((sum, inv) => sum + Number(inv.total), 0);
+    const zero = new Prisma.Decimal(0);
+    const totalSales = invoices.reduce(
+      (acc, inv) => acc.plus(new Prisma.Decimal(inv.total)),
+      zero,
+    );
     const totalCash = invoices
       .filter((inv) => inv.paymentMethod === 'CASH')
-      .reduce((sum, inv) => sum + Number(inv.paid), 0);
+      .reduce((acc, inv) => acc.plus(new Prisma.Decimal(inv.paid)), zero);
     const totalOnline = invoices
       .filter((inv) => inv.paymentMethod === 'ONLINE')
-      .reduce((sum, inv) => sum + Number(inv.paid), 0);
+      .reduce((acc, inv) => acc.plus(new Prisma.Decimal(inv.paid)), zero);
     const totalDebt = invoices
-      .filter((inv) => inv.paymentMethod === 'DEBT' || inv.paymentMethod === 'PARTIAL')
-      .reduce((sum, inv) => sum + Number(inv.remaining), 0);
-    const totalPaid = invoices.reduce((sum, inv) => sum + Number(inv.paid), 0);
+      .filter(
+        (inv) => inv.paymentMethod === 'DEBT' || inv.paymentMethod === 'PARTIAL',
+      )
+      .reduce((acc, inv) => acc.plus(new Prisma.Decimal(inv.remaining)), zero);
+    const totalPaid = invoices.reduce(
+      (acc, inv) => acc.plus(new Prisma.Decimal(inv.paid)),
+      zero,
+    );
 
     return {
       date: startOfDay.toISOString().split('T')[0],
       summary: {
         invoiceCount: invoices.length,
-        totalSales,
-        totalPaid,
-        totalCash,
-        totalOnline,
-        totalDebt,
+        totalSales: totalSales.toString(),
+        totalPaid: totalPaid.toString(),
+        totalCash: totalCash.toString(),
+        totalOnline: totalOnline.toString(),
+        totalDebt: totalDebt.toString(),
       },
       invoices,
     };
@@ -642,8 +740,7 @@ export class InvoiceService {
 
   // ─── Delete (Admin only, with stock restoration) ──────────────────────────────
 
-  async remove(storeId: string | null, id: string): Promise<void> {
-    const sid = this.requireStoreId(storeId);
+  async remove(sid: string, id: string): Promise<void> {
 
     const invoice = await this.db.invoice.findFirst({
       where: { id, storeId: sid },
@@ -661,17 +758,26 @@ export class InvoiceService {
       );
     }
 
-    await this.db.$transaction(async (tx) => {
-      for (const item of invoice.items) {
-        if (item.productId) {
-          await tx.product.update({
-            where: { id: item.productId },
-            data: { stock: { increment: item.quantity } },
-          });
+    await this.db.$transaction(
+      async (tx) => {
+        for (const item of invoice.items) {
+          if (item.productId) {
+            await tx.product.updateMany({
+              where: { id: item.productId, storeId: sid },
+              data: { stock: { increment: item.quantity } },
+            });
+          }
         }
-      }
 
-      await tx.invoice.delete({ where: { id } });
-    });
+        await tx.invoice.delete({ where: { id } });
+      },
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        maxWait: 10_000,
+        timeout: 30_000,
+      },
+    );
+
+    void this.cacheInvalidator.invalidateStoreData(sid);
   }
 }

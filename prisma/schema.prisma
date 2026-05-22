@@ -11,20 +11,25 @@ datasource db {
 }
 // Stores
 model Store {
-  id        String      @id @default(uuid())
-  name      String
-  subdomain String?     @unique
-  plan      Plan        @default(FREE)
-  status    StoreStatus @default(PENDING)
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+  id                String      @id @default(uuid())
+  name              String
+  subdomain         String?     @unique
+  plan              Plan        @default(FREE)
+  status            StoreStatus @default(PENDING)
+  // Monotonic counter for invoice numbers within this store. Bumped atomically
+  // by `tx.store.update({ data: { lastInvoiceNumber: { increment: 1 } } })`
+  // inside the invoice-creation transaction to avoid the read-then-write race
+  // that `MAX(number) + 1` is vulnerable to under concurrency.
+  lastInvoiceNumber Int         @default(0)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
 
   // Relations
-  users     User[]
-  products  Product[]
-  customers Customer[]
-  invoices  Invoice[]
-  debts     Debt[]
+  users             User[]
+  products          Product[]
+  customers         Customer[]
+  invoices          Invoice[]
+  debts             Debt[]
 
   @@map("stores")
 }
@@ -61,6 +66,7 @@ model User {
   store     Store?   @relation(fields: [storeId], references: [id], onDelete: Cascade)
 
   @@unique([username, storeId]) // Same username can exist in different stores
+  @@index([storeId, role])
   @@map("users")
 }
 
@@ -90,27 +96,33 @@ model Product {
   // Relations
   invoiceItems InvoiceItem[]
 
-  @@index([storeId])
   @@unique([barcode, storeId]) // Barcode must be unique within a store
+  @@index([storeId, isActive]) // covers the existing single-column lookup too
+  @@index([storeId, name])     // for name search/order within a store
   @@map("products")
 }
 
 // Customers
 model Customer {
-  id        String   @id @default(uuid())
+  id        String    @id @default(uuid())
   name      String
   phone     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
 
   // Foreign key
   storeId   String
-  store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  store     Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
 
   // Relations
   invoices  Invoice[]
   debts     Debt[]
 
+  @@index([storeId, isDeleted])
+  @@index([storeId, createdAt(sort: Desc)]) // paginated list ordered by recency
+  @@index([storeId, name])                  // name search within a store
   @@map("customers")
 }
 
@@ -138,6 +150,10 @@ model Invoice {
   debt          Debt?
 
   @@unique([number, storeId]) // Invoice number must be unique within a store
+  @@index([storeId, date(sort: Desc)])                  // list + dailySales
+  @@index([storeId, paymentMethod, date])               // filtered list / reports
+  @@index([storeId, customerId, date(sort: Desc)])      // customer history
+  @@index([customerId])                                 // FK lookups
   @@map("invoices")
 }
 
@@ -164,6 +180,8 @@ model InvoiceItem {
   productId   String?
   product     Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
 
+  @@index([invoiceId])
+  @@index([productId])
   @@map("invoice_items")
 }
 
@@ -193,6 +211,9 @@ model Debt {
   // Relations
   payments   DebtPayment[]
 
+  @@index([storeId, isPaid, date(sort: Desc)])    // outstanding-debts list, recency
+  @@index([storeId, customerId, isPaid])          // per-customer unpaid lookup
+  @@index([customerId])                            // FK lookups
   @@map("debts")
 }
 
@@ -207,5 +228,6 @@ model DebtPayment {
   debtId    String
   debt      Debt     @relation(fields: [debtId], references: [id], onDelete: Cascade)
 
+  @@index([debtId, date(sort: Desc)])
   @@map("debt_payments")
 }

@@ -27,13 +27,13 @@ import { UpdateInvoiceDto } from './dto/update-invoice.dto';
 import { InvoiceQueryDto } from './dto/invoice-query.dto';
 import { JwtGuard } from '../../common/guards/jwt.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { TenantGuard } from '../../common/guards/tenant.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import type { JwtPayload } from '../../common/decorators/current-user.decorator';
+import { StoreId } from '../../common/decorators/store-id.decorator';
 
 @ApiTags('الفواتير')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtGuard, RolesGuard)
+@UseGuards(JwtGuard, TenantGuard, RolesGuard)
 @Controller('invoices')
 export class InvoiceController {
   constructor(private readonly invoiceService: InvoiceService) {}
@@ -46,8 +46,8 @@ export class InvoiceController {
   @ApiResponse({ status: 201, description: 'تم إنشاء الفاتورة بنجاح' })
   @ApiResponse({ status: 400, description: 'بيانات غير صالحة أو مخزون غير كافٍ' })
   @ApiResponse({ status: 404, description: 'منتج أو عميل غير موجود' })
-  create(@CurrentUser() user: JwtPayload, @Body() dto: CreateInvoiceDto) {
-    return this.invoiceService.create(user.storeId, dto);
+  create(@StoreId() sid: string, @Body() dto: CreateInvoiceDto) {
+    return this.invoiceService.create(sid, dto);
   }
 
   @Get()
@@ -60,8 +60,8 @@ export class InvoiceController {
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1, description: 'رقم الصفحة' })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 20, description: 'عدد العناصر لكل صفحة' })
   @ApiResponse({ status: 200, description: 'قائمة فواتير مُرقّمة' })
-  findAll(@CurrentUser() user: JwtPayload, @Query() query: InvoiceQueryDto) {
-    return this.invoiceService.findAll(user.storeId, query);
+  findAll(@StoreId() sid: string, @Query() query: InvoiceQueryDto) {
+    return this.invoiceService.findAll(sid, query);
   }
 
   @Get('daily-sales')
@@ -69,8 +69,8 @@ export class InvoiceController {
   @ApiOperation({ summary: 'ملخص المبيعات اليومية — الإجماليات حسب طريقة الدفع' })
   @ApiQuery({ name: 'date', required: false, description: 'التاريخ (YYYY-MM-DD)، افتراضياً اليوم' })
   @ApiResponse({ status: 200, description: 'ملخص المبيعات اليومية' })
-  getDailySales(@CurrentUser() user: JwtPayload, @Query('date') date?: string) {
-    return this.invoiceService.getDailySales(user.storeId, date);
+  getDailySales(@StoreId() sid: string, @Query('date') date?: string) {
+    return this.invoiceService.getDailySales(sid, date);
   }
 
   @Get('number/:number')
@@ -80,10 +80,10 @@ export class InvoiceController {
   @ApiResponse({ status: 200, description: 'الفاتورة مع بنودها وبيانات العميل والدين' })
   @ApiResponse({ status: 404, description: 'الفاتورة غير موجودة' })
   findByNumber(
-    @CurrentUser() user: JwtPayload,
+    @StoreId() sid: string,
     @Param('number', ParseIntPipe) invoiceNumber: number,
   ) {
-    return this.invoiceService.findByNumber(user.storeId, invoiceNumber);
+    return this.invoiceService.findByNumber(sid, invoiceNumber);
   }
 
   @Get(':id')
@@ -92,8 +92,8 @@ export class InvoiceController {
   @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف الفاتورة' })
   @ApiResponse({ status: 200, description: 'الفاتورة مع كافة التفاصيل' })
   @ApiResponse({ status: 404, description: 'الفاتورة غير موجودة' })
-  findOne(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
-    return this.invoiceService.findOne(user.storeId, id);
+  findOne(@StoreId() sid: string, @Param('id', ParseUUIDPipe) id: string) {
+    return this.invoiceService.findOne(sid, id);
   }
 
   @Patch(':id')
@@ -107,11 +107,11 @@ export class InvoiceController {
   @ApiResponse({ status: 400, description: 'بيانات غير صالحة أو مخزون غير كافٍ أو دين عليه دفعات' })
   @ApiResponse({ status: 404, description: 'الفاتورة أو المنتج أو العميل غير موجود' })
   update(
-    @CurrentUser() user: JwtPayload,
+    @StoreId() sid: string,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateInvoiceDto,
   ) {
-    return this.invoiceService.update(user.storeId, id, dto);
+    return this.invoiceService.update(sid, id, dto);
   }
 
   @Delete(':id')
@@ -124,7 +124,7 @@ export class InvoiceController {
   @ApiResponse({ status: 204, description: 'تم حذف الفاتورة' })
   @ApiResponse({ status: 400, description: 'لا يمكن الحذف — يوجد دفعات على الدين المرتبط' })
   @ApiResponse({ status: 404, description: 'الفاتورة غير موجودة' })
-  async remove(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
-    await this.invoiceService.remove(user.storeId, id);
+  async remove(@StoreId() sid: string, @Param('id', ParseUUIDPipe) id: string) {
+    await this.invoiceService.remove(sid, id);
   }
 }
