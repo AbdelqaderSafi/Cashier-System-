@@ -14,7 +14,11 @@ interface CustomerDebtRow {
   oldestDebtDays: number;
 }
 
-const CURRENCY = '₪';
+// Use the short Arabic letter "ش" instead of the Unicode ₪ glyph because the
+// embedded Cairo font ships without U+20AA, so on Linux Chromium (Railway)
+// the symbol falls back to a "tofu" □ box. A plain Arabic letter renders
+// perfectly in any Arabic-capable font.
+const CURRENCY = 'ش';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Browsers to try in order. Add Linux paths for production servers. */
@@ -363,7 +367,7 @@ export class BackupService {
   .kpis-strip { background: #F8FAFC; padding: 20px 36px; display: flex; justify-content: space-around; border-bottom: 1px solid #E2E8F0; }
   .kpi { text-align: center; }
   .kpi .lbl { font-size: 11px; color: #64748B; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
-  .kpi .val { font-size: 26px; font-weight: 800; color: #0F172A; margin-top: 4px; direction: ltr; }
+  .kpi .val { font-size: 26px; font-weight: 800; color: #0F172A; margin-top: 4px; }
   .kpi .val.warn { color: #B45309; }
   .kpi .val .unit { font-size: 12px; color: #94A3B8; font-weight: 500; }
 
@@ -378,14 +382,14 @@ export class BackupService {
   .top-card .who { flex: 1; }
   .top-card .who-name { font-weight: 700; color: #0F172A; }
   .top-card .who-phone { font-size: 11px; color: #64748B; direction: ltr; text-align: right; margin-top: 2px; font-family: ui-monospace, monospace; }
-  .top-card .who-amount { font-size: 18px; font-weight: 800; color: #B45309; direction: ltr; }
+  .top-card .who-amount { font-size: 18px; font-weight: 800; color: #B45309; }
   .top-card .who-amount .curr { font-size: 12px; color: #92400E; font-weight: 500; }
 
   /* ── Buckets ── */
   .buckets { display: flex; flex-direction: column; gap: 10px; }
   .bucket-head { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
   .bucket-label { font-weight: 600; color: #1E293B; }
-  .bucket-meta { color: #64748B; direction: ltr; }
+  .bucket-meta { color: #64748B; }
   .bucket-bar { height: 8px; background: #F1F5F9; border-radius: 999px; overflow: hidden; }
   .bucket-fill { height: 100%; border-radius: 999px; }
 
@@ -403,13 +407,13 @@ export class BackupService {
   .phone { font-family: ui-monospace, monospace; text-align: right; color: #475569; }
   .cnt { text-align: center; color: #475569; }
   .age { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
-  .amount { text-align: left; direction: ltr; font-weight: 700; color: #B45309; font-variant-numeric: tabular-nums; }
+  .amount { text-align: left; font-weight: 700; color: #B45309; font-variant-numeric: tabular-nums; }
   .amount .curr { font-size: 11px; color: #92400E; font-weight: 500; }
 
   /* ── Grand total ── */
   .grand { background: #0F172A; color: #fff; padding: 14px 36px; display: flex; justify-content: space-between; align-items: center; }
   .grand .lbl { font-size: 13px; font-weight: 600; }
-  .grand .val { font-size: 22px; font-weight: 800; direction: ltr; color: #FCD34D; }
+  .grand .val { font-size: 22px; font-weight: 800; color: #FCD34D; }
   .grand .val .curr { color: #FDE68A; font-weight: 500; font-size: 14px; }
 
   .footer { padding: 14px 36px; background: #F8FAFC; text-align: center; font-size: 10px; color: #94A3B8; }
@@ -480,14 +484,23 @@ ${top3.length > 0 ? `
 
   // ─── Formatting helpers ──────────────────────────────────────────────────────
 
-  /** Renders a Decimal as "1,234.56 ₪" inside an LTR span. */
+  /**
+   * Renders a Decimal as "1,234.56 ش".
+   *
+   * BiDi care: the digits must stay LTR (so the thousands separator and dot
+   * read correctly) while "ش" must stay RTL. Wrapping the whole thing in a
+   * single `dir="ltr"` span made the Arabic abbreviation flip in front of the
+   * number on Linux Chromium (the BiDi algorithm groups consecutive Arabic
+   * characters into an RTL run). The fix: isolate only the digits with `<bdi
+   * dir="ltr">` and leave the currency abbreviation in its natural direction.
+   */
   private amount(d: Prisma.Decimal): string {
     const n = Number(d.toFixed(2));
     const formatted = n.toLocaleString('en-US', {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     });
-    return `<span dir="ltr">${formatted} <span class="curr">${CURRENCY}</span></span>`;
+    return `<bdi dir="ltr">${formatted}</bdi> <span class="curr">${CURRENCY}</span>`;
   }
 
   /** "الجمعة، 22 مايو 2026" — full Arabic weekday + day + month + year. */

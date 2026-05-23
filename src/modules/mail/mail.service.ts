@@ -86,6 +86,11 @@ export class MailService {
     subdomain: string,
     username: string,
   ) {
+    // Single canonical login URL for every store. Configurable via env so a
+    // future domain change is one Railway variable away — falls back to the
+    // current Vercel deployment.
+    const loginUrl = process.env.FRONTEND_URL || 'https://safipos.vercel.app';
+
     try {
       await this.send({
         sender: this.sender,
@@ -109,8 +114,8 @@ export class MailService {
                   <tr>
                     <td style="padding: 6px 0; color: #6B7280; width: 140px;">رابط الدخول</td>
                     <td>
-                      <a href="https://${subdomain}.safi-pos.com/login" style="color: #4F46E5; text-decoration: none;">
-                        https://${subdomain}.safi-pos.com/login
+                      <a href="${loginUrl}" style="color: #4F46E5; text-decoration: none;">
+                        ${loginUrl}
                       </a>
                     </td>
                   </tr>
@@ -129,7 +134,7 @@ export class MailService {
                 </table>
               </div>
               <div style="text-align: center; margin: 28px 0;">
-                <a href="https://${subdomain}.safi-pos.com/login"
+                <a href="${loginUrl}"
                    style="background: #4F46E5; color: #ffffff; padding: 14px 32px;
                           border-radius: 6px; text-decoration: none; font-size: 16px;
                           font-weight: bold; display: inline-block;">
@@ -216,8 +221,11 @@ export class MailService {
         content: a.content.toString('base64'),
       }));
 
-      const currency = '₪';
-      const dashboardUrl = process.env.FRONTEND_URL || 'https://safi-pos.com';
+      // Short Arabic letter instead of the U+20AA glyph — the latter renders
+      // as a tofu box in some mail clients/devices that lack the Shekel
+      // codepoint. A plain letter works in every Arabic-capable font.
+      const currency = 'ش';
+      const dashboardUrl = process.env.FRONTEND_URL || 'https://safipos.vercel.app';
 
       // Optional Top-3 mini-list. Hidden if no debtors qualify.
       const topThreeHtml = summary.topThree.length
@@ -238,8 +246,8 @@ export class MailService {
                         <span style="color: #B45309; font-weight: 700;">#${i + 1}</span>
                         &nbsp;${t.name}
                       </div>
-                      <div style="font-weight: 700; color: #B45309; direction: ltr;">
-                        ${t.amountDisplay} ${currency}
+                      <div style="font-weight: 700; color: #B45309;">
+                        <bdi dir="ltr">${t.amountDisplay}</bdi> ${currency}
                       </div>
                     </div>`,
                 )
@@ -287,7 +295,7 @@ export class MailService {
                   </td>
                   <td style="width: 33.33%; padding: 12px; background: #FEF3C7; border-top: 1px solid #FDE68A; border-bottom: 1px solid #FDE68A; text-align: center;">
                     <div style="font-size: 10px; color: #92400E; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;">الإجمالي</div>
-                    <div style="font-size: 22px; font-weight: 800; color: #B45309; margin-top: 4px; direction: ltr;">${summary.grandTotalDisplay} ${currency}</div>
+                    <div style="font-size: 22px; font-weight: 800; color: #B45309; margin-top: 4px;"><bdi dir="ltr">${summary.grandTotalDisplay}</bdi> ${currency}</div>
                   </td>
                   <td style="width: 33.33%; padding: 12px; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 0 6px 6px 0; text-align: center;">
                     <div style="font-size: 10px; color: #64748B; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;">أقدم دين</div>
