@@ -68,6 +68,18 @@ export class CreateInvoiceDto {
   @MaxLength(500)
   notes?: string;
 
+  @ApiPropertyOptional({
+    example: 'offline-invoice-1716640200000',
+    description:
+      'مفتاح idempotency من العميل (مثلاً الـ localId المُولَّد وقت الحفظ أوف لاين). ' +
+      'إذا تم إرسال نفس المفتاح مرتين لنفس المتجر، السيرفر يعيد الفاتورة الأصلية بدون إنشاء فاتورة مكررة. ' +
+      'استخدمه دائماً في المسارات التي تُعيد المحاولة (sync queue / outbox).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  clientInvoiceId?: string;
+
   @ApiProperty({
     type: [CreateInvoiceItemDto],
     description: 'بنود الفاتورة (منتج واحد على الأقل)',

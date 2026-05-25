@@ -40,6 +40,10 @@ export class InvoiceService {
   // Numbering:    `lastInvoiceNumber` on Store is incremented atomically — the
   //               classic `MAX(number)+1` would let two concurrent invoices
   //               grab the same number under a unique-index race.
+  // Idempotency:  if `clientInvoiceId` is supplied, a per-(store,key) advisory
+  //               lock + lookup short-circuits retries — the client can safely
+  //               re-POST after a network drop without producing a duplicate
+  //               invoice or double-charging stock.
   // Money:        all arithmetic uses Prisma.Decimal — no .toFixed round-trips.
 
   async create(sid: string, dto: CreateInvoiceDto): Promise<Invoice> {
@@ -138,6 +142,28 @@ export class InvoiceService {
 
     const invoice = await this.db.$transaction(
       async (tx) => {
+        // 0) Idempotency short-circuit — only when the client opted in by
+        //    sending a stable key (the offline outbox does this; the regular
+        //    online "ring up a sale" flow doesn't and falls through).
+        //
+        //    pg_advisory_xact_lock keyed by (storeId, clientInvoiceId)
+        //    serializes concurrent retries of the *same* invoice without
+        //    blocking unrelated sales. After the lock we check the table;
+        //    if the row exists, return it as-is (stock was already deducted
+        //    on the original commit, so we must NOT run the side effects
+        //    below).
+        if (dto.clientInvoiceId) {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`invoice:create:${sid}:${dto.clientInvoiceId}`}))`;
+          const existing = await tx.invoice.findFirst({
+            where: { storeId: sid, clientInvoiceId: dto.clientInvoiceId },
+            include: {
+              items: true,
+              customer: { select: { id: true, name: true, phone: true } },
+            },
+          });
+          if (existing) return existing;
+        }
+
         // 1) Atomic stock deduction — single conditional UPDATE that refuses
         //    to go negative. Returns the number of rows updated; if any line
         //    couldn't be deducted (insufficient stock or product gone), we
@@ -182,7 +208,8 @@ export class InvoiceService {
         });
         const nextNumber = store.lastInvoiceNumber;
 
-        // 3) Insert invoice + items.
+        // 3) Insert invoice + items. clientInvoiceId is persisted so the
+        //    next retry hits the idempotency short-circuit above.
         const invoice = await tx.invoice.create({
           data: {
             number: nextNumber,
@@ -191,6 +218,7 @@ export class InvoiceService {
             remaining,
             paymentMethod: dto.paymentMethod,
             notes: dto.notes ?? null,
+            clientInvoiceId: dto.clientInvoiceId ?? null,
             customerId,
             storeId: sid,
             items: {

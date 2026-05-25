@@ -13,6 +13,20 @@ import { SyncPushDto } from './dto/sync-push.dto';
 import { CacheKeys, CacheTtl } from '../../common/cache/cache-keys';
 import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
 
+// Keep the first occurrence of each id in input order. Defensive against a
+// client that ships the same record twice in one payload (a retry that didn't
+// dedupe its outbox, two open tabs pushing the same queue, etc.).
+function dedupeById<T extends { id: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    out.push(item);
+  }
+  return out;
+}
+
 @Injectable()
 export class SyncService {
   private readonly logger = new Logger(SyncService.name);
@@ -77,28 +91,43 @@ export class SyncService {
   //               verified against `storeId = sid` *before* any write — closes
   //               the IDOR that allowed pushing rows attached to a foreign
   //               store's customer or product.
-  // Idempotency:  pre-fetched existing IDs are filtered out, then `createMany`
-  //               with `skipDuplicates: true` handles any remaining race.
+  // Idempotency:  defensive in-payload dedup + per-store advisory xact lock +
+  //               scoped pre-fetch of existing ids. The lock collapses the
+  //               race window that previously let two concurrent pushes both
+  //               pre-fetch "nothing exists", both proceed to insert, and
+  //               both run side effects for the same UUIDs.
   // Numbering:    one atomic `lastInvoiceNumber: { increment: N }` allocates N
   //               consecutive numbers for the whole batch (vs. N round-trips).
+  //               Under the advisory lock N == genuinely-new count, so no
+  //               numbers leak when a replay arrives.
   // Money:        all arithmetic uses Prisma.Decimal. Debt overpayment is a
   //               hard reject (4xx) — no more silent capping.
   // Atomicity:    one `$transaction` wraps everything; any failure rolls back.
 
   async push(sid: string, dto: SyncPushDto) {
+    // ── Defensive in-payload dedup ──────────────────────────────────────────
+    // A buggy/retry-happy client could ship the same record twice inside one
+    // payload. Without this step, a duplicated invoice id would slip past the
+    // pre-fetch filter (id not in DB yet), get two slots in the
+    // lastInvoiceNumber bump, and double-decrement stock — even though only
+    // one row would actually land thanks to the PK conflict at INSERT time.
+    const invoices = dedupeById(dto.invoices);
+    const debts = dedupeById(dto.debts);
+    const debtPayments = dedupeById(dto.debtPayments);
+
     // Collect every referenced ID once so the validation queries are batched.
-    const inPayloadInvoiceIds = new Set(dto.invoices.map((i) => i.id));
+    const inPayloadInvoiceIds = new Set(invoices.map((i) => i.id));
 
     const customerIdsReferenced = new Set<string>();
-    for (const inv of dto.invoices) {
+    for (const inv of invoices) {
       if (inv.customerId) customerIdsReferenced.add(inv.customerId);
     }
-    for (const d of dto.debts) {
+    for (const d of debts) {
       customerIdsReferenced.add(d.customerId);
     }
 
     const productIdsReferenced = new Set<string>();
-    for (const inv of dto.invoices) {
+    for (const inv of invoices) {
       for (const item of inv.items) {
         if (item.productId) productIdsReferenced.add(item.productId);
       }
@@ -107,7 +136,7 @@ export class SyncService {
     // Debts may reference invoices that are NOT in this payload (e.g. paying
     // off an older invoice). Those must already live under this store.
     const externalInvoiceIds = new Set<string>();
-    for (const d of dto.debts) {
+    for (const d of debts) {
       if (d.invoiceId && !inPayloadInvoiceIds.has(d.invoiceId)) {
         externalInvoiceIds.add(d.invoiceId);
       }
@@ -115,6 +144,18 @@ export class SyncService {
 
     const result = await this.db.$transaction(
       async (tx) => {
+        // ── Serialize concurrent pushes for this store ────────────────────────
+        // Without this lock, two pushes that race (e.g. the user spam-refreshes
+        // the page when connectivity returns and the sync queue fires twice in
+        // parallel) both pre-fetch existing IDs and see nothing, both proceed
+        // to insert. `skipDuplicates: true` keeps the invoices table itself
+        // clean, but the side effects — `lastInvoiceNumber` bump and per-item
+        // stock decrement — run in BOTH transactions for the SAME UUIDs, so
+        // stock is over-deducted and the report lies about what was inserted.
+        // pg_advisory_xact_lock is per-transaction (auto-released at COMMIT /
+        // ROLLBACK), keyed by store id so unrelated tenants stay parallel.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`sync:push:${sid}`}))`;
+
         // ── Step 0 — Cross-tenant validation ──────────────────────────────────
         if (customerIdsReferenced.size > 0) {
           const valid = await tx.customer.count({
@@ -165,16 +206,22 @@ export class SyncService {
         };
 
         // ── Step 1 — Invoices ──────────────────────────────────────────────────
-        if (dto.invoices.length > 0) {
+        if (invoices.length > 0) {
+          // Scope to storeId so a (cosmically unlikely) cross-store UUID
+          // collision doesn't make us treat a foreign invoice as "already
+          // done" and silently drop ours.
           const existingInvoiceIds = new Set(
             (
               await tx.invoice.findMany({
-                where: { id: { in: dto.invoices.map((i) => i.id) } },
+                where: {
+                  id: { in: invoices.map((i) => i.id) },
+                  storeId: sid,
+                },
                 select: { id: true },
               })
             ).map((r) => r.id),
           );
-          const newInvoices = dto.invoices.filter(
+          const newInvoices = invoices.filter(
             (i) => !existingInvoiceIds.has(i.id),
           );
           report.invoices.skipped = existingInvoiceIds.size;
@@ -190,6 +237,12 @@ export class SyncService {
             const firstNumber =
               store.lastInvoiceNumber - newInvoices.length + 1;
 
+            // No `skipDuplicates` — with the advisory lock + scoped pre-fetch
+            // above, every id in `newInvoices` is guaranteed not to exist for
+            // this store. If a duplicate somehow reached this INSERT it would
+            // mean either lock acquisition was bypassed or the input wasn't
+            // deduped: fail loudly (transaction rolls back) rather than
+            // silently skip and leave stock double-decremented below.
             await tx.invoice.createMany({
               data: newInvoices.map((invoice, idx) => ({
                 id: invoice.id,
@@ -203,7 +256,6 @@ export class SyncService {
                 customerId: invoice.customerId ?? null,
                 storeId: sid,
               })),
-              skipDuplicates: true,
             });
 
             // Flatten every item from every new invoice into a single
@@ -222,10 +274,10 @@ export class SyncService {
               })),
             );
             if (allItems.length > 0) {
-              await tx.invoiceItem.createMany({
-                data: allItems,
-                skipDuplicates: true,
-              });
+              // Same reasoning as the invoices INSERT: no skipDuplicates so
+              // a stray collision can't silently drop an item while its
+              // parent invoice was just created.
+              await tx.invoiceItem.createMany({ data: allItems });
             }
 
             // Atomic per-item stock deduction. Offline-sync semantics: if
@@ -260,16 +312,19 @@ export class SyncService {
         // ── Step 2 — Debts ────────────────────────────────────────────────────
         // Debts are sent separately (not auto-created from invoices) so the
         // frontend retains full control over the debt record contents.
-        if (dto.debts.length > 0) {
+        if (debts.length > 0) {
           const existingDebtIds = new Set(
             (
               await tx.debt.findMany({
-                where: { id: { in: dto.debts.map((d) => d.id) } },
+                where: {
+                  id: { in: debts.map((d) => d.id) },
+                  storeId: sid,
+                },
                 select: { id: true },
               })
             ).map((r) => r.id),
           );
-          const newDebts = dto.debts.filter((d) => !existingDebtIds.has(d.id));
+          const newDebts = debts.filter((d) => !existingDebtIds.has(d.id));
           report.debts.skipped = existingDebtIds.size;
 
           if (newDebts.length > 0) {
@@ -285,7 +340,6 @@ export class SyncService {
                 invoiceId: debt.invoiceId ?? null,
                 storeId: sid,
               })),
-              skipDuplicates: true,
             });
             report.debts.inserted = newDebts.length;
           }
@@ -295,17 +349,23 @@ export class SyncService {
         // Sequential because two payments to the same debt in one batch must
         // compound. Each debt row is locked with SELECT FOR UPDATE before
         // mutation. Overpayment is a HARD reject — the client must re-sync.
-        if (dto.debtPayments.length > 0) {
+        if (debtPayments.length > 0) {
+          // Scope to this store via the parent debt — same reasoning as the
+          // invoice/debt pre-fetches: a UUID that happens to exist for some
+          // other store mustn't trick us into marking ours as "already done".
           const existingPaymentIds = new Set(
             (
               await tx.debtPayment.findMany({
-                where: { id: { in: dto.debtPayments.map((p) => p.id) } },
+                where: {
+                  id: { in: debtPayments.map((p) => p.id) },
+                  debt: { storeId: sid },
+                },
                 select: { id: true },
               })
             ).map((r) => r.id),
           );
 
-          for (const payment of dto.debtPayments) {
+          for (const payment of debtPayments) {
             if (existingPaymentIds.has(payment.id)) {
               report.debtPayments.skipped++;
               continue;

@@ -139,6 +139,15 @@ model Invoice {
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
+  // Client-supplied idempotency key (the offline localId from IndexedDB).
+  // Optional: only offline-synced invoices carry it. The (storeId, key) unique
+  // index lets the server short-circuit retries when the network drops between
+  // commit and response delivery — the client re-sends the same key and we
+  // return the already-created invoice instead of creating a duplicate.
+  // NULL values are allowed (and PostgreSQL treats multiple NULLs as distinct
+  // in unique indexes), so legacy/online-only flows aren't constrained.
+  clientInvoiceId String?
+
   // Foreign keys
   customerId    String?
   customer      Customer?     @relation(fields: [customerId], references: [id])
@@ -150,6 +159,7 @@ model Invoice {
   debt          Debt?
 
   @@unique([number, storeId]) // Invoice number must be unique within a store
+  @@unique([storeId, clientInvoiceId]) // Idempotency: one invoice per client key per store
   @@index([storeId, date(sort: Desc)])                  // list + dailySales
   @@index([storeId, paymentMethod, date])               // filtered list / reports
   @@index([storeId, customerId, date(sort: Desc)])      // customer history
