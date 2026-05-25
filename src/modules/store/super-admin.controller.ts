@@ -37,4 +37,26 @@ export class SuperAdminController {
   approveStore(@Param('storeId') storeId: string) {
     return this.storeService.approveStore(storeId);
   }
+
+  @Patch(':storeId/suspend')
+  @ApiOperation({ summary: 'تعليق متجر — يطرد جميع الجلسات المفتوحة (للمشرف العام فقط)' })
+  @ApiParam({ name: 'storeId', description: 'معرّف المتجر (UUID)' })
+  @ApiResponse({ status: 200, description: 'تم تعليق المتجر وسيتم طرد المستخدمين المسجَّلين' })
+  @ApiResponse({ status: 400, description: 'المتجر مُعلَّق مسبقاً' })
+  @ApiResponse({ status: 403, description: 'ممنوع — مطلوب دور SUPER_ADMIN' })
+  @ApiResponse({ status: 404, description: 'المتجر غير موجود' })
+  suspendStore(@Param('storeId') storeId: string) {
+    return this.storeService.suspendStore(storeId);
+  }
+
+  @Patch(':storeId/reactivate')
+  @ApiOperation({ summary: 'إعادة تفعيل متجر مُعلَّق (للمشرف العام فقط)' })
+  @ApiParam({ name: 'storeId', description: 'معرّف المتجر (UUID)' })
+  @ApiResponse({ status: 200, description: 'تم إعادة تفعيل المتجر' })
+  @ApiResponse({ status: 400, description: 'المتجر ليس مُعلَّقاً' })
+  @ApiResponse({ status: 403, description: 'ممنوع — مطلوب دور SUPER_ADMIN' })
+  @ApiResponse({ status: 404, description: 'المتجر غير موجود' })
+  reactivateStore(@Param('storeId') storeId: string) {
+    return this.storeService.reactivateStore(storeId);
+  }
 }

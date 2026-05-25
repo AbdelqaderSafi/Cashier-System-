@@ -9,10 +9,15 @@ export const CacheKeys = {
     `product:barcode:${sid}:${barcode}` as const,
   dailyProfit: (sid: string, dayIso: string) =>
     `report:daily-profit:${sid}:${dayIso}` as const,
+  storeStatus: (sid: string) => `store:status:${sid}` as const,
 };
 
 export const CacheTtl = {
   SYNC_INIT: 30 * 1000, // 30s — short, since invalidation is best-effort
   PRODUCT_BARCODE: 5 * 60 * 1000, // 5min — cashier hits this with every scan
   DAILY_PROFIT_PAST: 24 * 60 * 60 * 1000, // 24h — past days are immutable
+  // Bounds the worst-case lag between a SUPER_ADMIN suspending a store and the
+  // store's open sessions being kicked out. Suspend/reactivate also explicitly
+  // bust this key, so the TTL is just a backstop.
+  STORE_STATUS: 30 * 1000,
 } as const;

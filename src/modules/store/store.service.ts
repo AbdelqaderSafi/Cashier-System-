@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { MailService } from '../mail/mail.service';
+import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
 import { CreateStoreDTO, UpdateStoreDTO } from './dto/store.dto';
 
 @Injectable()
@@ -13,6 +14,7 @@ export class StoreService {
   constructor(
     private readonly db: DatabaseService,
     private readonly mailService: MailService,
+    private readonly cacheInvalidation: CacheInvalidationService,
   ) {}
 
   generateSubdomain(name: string): string {
@@ -144,6 +146,45 @@ export class StoreService {
       );
     }
 
+    // Bust the JwtGuard status cache so any pending sessions see the new state.
+    await this.cacheInvalidation.invalidateStoreStatus(storeId);
+
     return { message: `Store "${updatedStore.name}" has been approved successfully.` };
+  }
+
+  async suspendStore(storeId: string): Promise<{ message: string }> {
+    const store = await this.findById(storeId);
+
+    if (store.status === 'SUSPENDED') {
+      throw new BadRequestException('Store is already suspended');
+    }
+
+    const updated = await this.db.store.update({
+      where: { id: storeId },
+      data: { status: 'SUSPENDED' },
+    });
+
+    // Bust the JwtGuard status cache so open sessions are kicked out on their
+    // next request instead of waiting up to STORE_STATUS TTL.
+    await this.cacheInvalidation.invalidateStoreStatus(storeId);
+
+    return { message: `Store "${updated.name}" has been suspended.` };
+  }
+
+  async reactivateStore(storeId: string): Promise<{ message: string }> {
+    const store = await this.findById(storeId);
+
+    if (store.status !== 'SUSPENDED') {
+      throw new BadRequestException('Only suspended stores can be reactivated');
+    }
+
+    const updated = await this.db.store.update({
+      where: { id: storeId },
+      data: { status: 'APPROVED' },
+    });
+
+    await this.cacheInvalidation.invalidateStoreStatus(storeId);
+
+    return { message: `Store "${updated.name}" has been reactivated.` };
   }
 }

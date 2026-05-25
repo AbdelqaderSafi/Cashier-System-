@@ -32,6 +32,10 @@ export class CacheInvalidationService {
     await this.safeDel(CacheKeys.syncInit(sid));
   }
 
+  async invalidateStoreStatus(sid: string): Promise<void> {
+    await this.safeDel(CacheKeys.storeStatus(sid));
+  }
+
   async invalidateProductBarcode(sid: string, barcode: string | null): Promise<void> {
     if (!barcode) return;
     await this.safeDel(CacheKeys.productByBarcode(sid, barcode));
