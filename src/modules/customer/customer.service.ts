@@ -30,13 +30,35 @@ export class CustomerService {
   ) {}
 
   // ─── Create ──────────────────────────────────────────────────────────────────
+  //
+  // Idempotency: if `clientCustomerId` is supplied, a per-(store,key) advisory
+  //              lock + lookup short-circuits retries — the offline outbox can
+  //              safely re-POST after a network drop (or after the user spam-
+  //              refreshes the page) without creating a duplicate customer or
+  //              duplicating the initial-debt opening balance.
 
   async create(sid: string, dto: CreateCustomerDto): Promise<Customer> {
     const customer = await this.db.$transaction(async (tx) => {
+      // Idempotency short-circuit — only when the client opted in.
+      // The advisory lock is scoped to (storeId, clientCustomerId) so two
+      // concurrent retries of the *same* customer serialize, but unrelated
+      // customer creations stay parallel.
+      if (dto.clientCustomerId) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`customer:create:${sid}:${dto.clientCustomerId}`}))`;
+        const existing = await tx.customer.findFirst({
+          where: { storeId: sid, clientCustomerId: dto.clientCustomerId },
+        });
+        // Return the original even if it was soft-deleted later — the client
+        // sent this key thinking the record was new; the dedupe is what they
+        // actually need (not a resurrection).
+        if (existing) return existing;
+      }
+
       const created = await tx.customer.create({
         data: {
           name: dto.name,
           phone: dto.phone ?? null,
+          clientCustomerId: dto.clientCustomerId ?? null,
           storeId: sid,
         },
       });

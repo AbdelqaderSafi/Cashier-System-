@@ -112,6 +112,12 @@ model Customer {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
+  // Client-supplied idempotency key (the offline localId from IndexedDB).
+  // Same idea as Invoice.clientInvoiceId: lets the server short-circuit
+  // retries when the network drops between commit and response delivery,
+  // so multiple page refreshes can't create the same customer twice.
+  clientCustomerId String?
+
   // Foreign key
   storeId   String
   store     Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
@@ -120,6 +126,7 @@ model Customer {
   invoices  Invoice[]
   debts     Debt[]
 
+  @@unique([storeId, clientCustomerId]) // Idempotency: one customer per client key per store
   @@index([storeId, isDeleted])
   @@index([storeId, createdAt(sort: Desc)]) // paginated list ordered by recency
   @@index([storeId, name])                  // name search within a store

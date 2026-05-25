@@ -24,4 +24,16 @@ export class CreateCustomerDto {
   @Min(0)
   @Type(() => Number)
   initialDebt?: number;
+
+  @ApiPropertyOptional({
+    example: 'offline-customer-1716640200000',
+    description:
+      'مفتاح idempotency من العميل (مثلاً الـ localId المُولَّد وقت الحفظ أوف لاين). ' +
+      'إذا تم إرسال نفس المفتاح مرتين لنفس المتجر، السيرفر يعيد العميل الأصلي بدون إنشاء عميل مكرر. ' +
+      'استخدمه دائماً في المسارات التي تُعيد المحاولة (sync queue / outbox).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  clientCustomerId?: string;
 }
