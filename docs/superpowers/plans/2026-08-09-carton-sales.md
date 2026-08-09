@@ -25,11 +25,30 @@
 - The carton field group is **all three or none**: `piecesPerCarton`, `cartonPurchasePrice`, `cartonSalePrice`.
 - In carton mode, opening stock = `(cartonCount × piecesPerCarton) + stock`. The `stock` field means **loose pieces** in carton mode. This is a deliberate deviation from the original requirements report — see spec §11.
 
-## ⚠️ Before you run any e2e test
+## ⚠️ Database safety — read before running ANY command
 
-`test/*.e2e-spec.ts` run against whatever `DATABASE_URL` points at, and the existing suites are written against the live Neon DB (see the header comment in `test/ledger-integrity.e2e-spec.ts`). They create a throwaway store with a `*-test-<uuid>` subdomain and delete it in `afterAll`.
+**The `DATABASE_URL` in the repo's `.env` points at the live production Neon database.** It holds real store data that must not be touched.
 
-**Confirm with the repo owner which database `DATABASE_URL` points at before the first e2e run.** If it is production, point it at a staging/branch database first. Every test in this plan follows the same isolated-store + teardown pattern, but do not assume that makes running against production acceptable.
+A local development database has already been created and brought up to the production schema:
+
+```
+postgresql://postgres@localhost:5432/casheer_dev
+```
+
+**Every command in this plan that reaches a database MUST be prefixed with that URL.** The plan spells the prefix out in each step — do not drop it.
+
+```bash
+DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" <command>
+```
+
+`dotenv` does not overwrite an already-set `process.env` value (verified), so the shell prefix wins over `.env`.
+
+**Two hard rules:**
+
+1. **Never run `prisma migrate dev`, `migrate reset`, or `db push` without the local prefix.** `migrate dev` offers to *reset the entire database* when it detects drift. Against production that is total data loss.
+2. **Never run `prisma migrate deploy` against production from here.** Production picks the migration up on its next deploy via the `start:migrate` script. Applying it by hand is not part of this plan.
+
+A `globalSetup` guard in `test/jest-e2e.json` (`test/guard-local-db.ts`) refuses to start the e2e suite unless `DATABASE_URL` resolves to a local host. It has been verified in both directions: it blocks the production host and passes `localhost`. If you see `Refusing to run the e2e suite against ...`, you forgot the prefix — add it, never weaken the guard.
 
 ## Task Dependency Order
 
@@ -39,6 +58,8 @@ Tasks are sequential: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10. 
 
 | File | Action | Responsibility |
 |---|---|---|
+| `test/guard-local-db.ts` | ✅ Done | Blocks the e2e suite from running against a non-local database |
+| `test/jest-e2e.json` | ✅ Done | Wires the guard in as `globalSetup` |
 | `package.json` | Modify | Fix unit-test module resolution for the generated Prisma client |
 | `prisma/schema.prisma` | Modify | Carton columns + `SaleUnit` enum |
 | `prisma/migrations/<ts>_add_carton_sales/migration.sql` | Create | Additive-only DDL |
@@ -151,7 +172,7 @@ In `model InvoiceItem`, after the `total` line, add:
 
 - [ ] **Step 4: Generate the migration without applying it**
 
-Run: `npx prisma migrate dev --create-only --name add_carton_sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npx prisma migrate dev --create-only --name add_carton_sales`
 Expected: prints the path of a new folder under `prisma/migrations/` and does **not** apply it.
 
 - [ ] **Step 5: Review and annotate the generated SQL**
@@ -188,7 +209,7 @@ ALTER TABLE "invoice_items" ADD COLUMN "stockQuantity" INTEGER;
 
 - [ ] **Step 6: Apply the migration and regenerate the client**
 
-Run: `npx prisma migrate dev`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npx prisma migrate dev`
 Expected: applies `add_carton_sales`, then runs `prisma generate`. `generated/prisma/client` now exports `SaleUnit`.
 
 - [ ] **Step 7: Write the backward-compatibility e2e test**
@@ -376,7 +397,7 @@ describe('Carton sales — backward compatibility', () => {
 
 - [ ] **Step 8: Run the backward-compatibility test**
 
-Run: `npm run test:e2e -- carton-sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- carton-sales`
 Expected: PASS — 3 tests. All three exercise only pre-existing code paths, so they must pass before any behaviour changes.
 
 - [ ] **Step 9: Commit**
@@ -722,7 +743,7 @@ describe('Carton sales — product create', () => {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `npm run test:e2e -- carton-sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- carton-sales`
 Expected: FAIL — the new tests return 400 `property piecesPerCarton should not exist` (`forbidNonWhitelisted` rejects fields not on the DTO).
 
 - [ ] **Step 3: Add the carton fields to `CreateProductDto`**
@@ -862,7 +883,7 @@ Replace the whole `create` method body with:
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `npm run test:e2e -- carton-sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- carton-sales`
 Expected: PASS — 8 tests (3 from Task 1 + 5 new).
 
 - [ ] **Step 6: Commit**
@@ -1005,7 +1026,7 @@ describe('Carton sales — product update', () => {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `npm run test:e2e -- carton-sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- carton-sales`
 Expected: FAIL — the carton fields are rejected as unknown properties on `UpdateProductDto`.
 
 - [ ] **Step 3: Add nullable carton fields to `UpdateProductDto`**
@@ -1146,7 +1167,7 @@ In `src/modules/product/product.service.ts`, replace the whole `update` method w
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `npm run test:e2e -- carton-sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- carton-sales`
 Expected: PASS — 13 tests.
 
 - [ ] **Step 6: Verify the unit tests and build still pass**
@@ -1563,7 +1584,7 @@ describe('Carton sales — invoice create', () => {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `npm run test:e2e -- carton-sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- carton-sales`
 Expected: FAIL — `saleUnit` rejected as an unknown property on `CreateInvoiceItemDto`.
 
 - [ ] **Step 3: Add `saleUnit` to `CreateInvoiceItemDto`**
@@ -1658,7 +1679,7 @@ Still in `create`, replace the stock-deduction loop (currently `for (const item 
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `npm run test:e2e -- carton-sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- carton-sales`
 Expected: PASS — 18 tests. The Task 1 backward-compat block must still pass; if it does not, the piece path regressed.
 
 - [ ] **Step 7: Commit**
@@ -1785,7 +1806,7 @@ describe('Carton sales — invoice update and delete', () => {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `npm run test:e2e -- carton-sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- carton-sales`
 Expected: FAIL — the delete test restores 1 piece instead of 24, and `saleUnit` is rejected on `UpdateInvoiceItemDto`.
 
 - [ ] **Step 3: Add `saleUnit` to `UpdateInvoiceItemDto`**
@@ -1929,7 +1950,7 @@ and the restore loop to:
 
 - [ ] **Step 8: Run the tests to verify they pass**
 
-Run: `npm run test:e2e -- carton-sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- carton-sales`
 Expected: PASS — 21 tests. The Task 1 legacy-restore test must still pass; it is the guard on the `stockPiecesOf` fallback.
 
 - [ ] **Step 9: Commit**
@@ -2034,7 +2055,7 @@ describe('Carton sales — read responses expose the line unit', () => {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `npm run test:e2e -- carton-sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- carton-sales`
 Expected: FAIL — `saleUnit` is `undefined` in all three responses (the fields exist on the row but are not in the `select` lists).
 
 - [ ] **Step 3: Add the fields to the invoice read selects**
@@ -2078,7 +2099,7 @@ In `src/modules/customer/customer.service.ts`, in `findOne`, change the nested i
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `npm run test:e2e -- carton-sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- carton-sales`
 Expected: PASS — 24 tests.
 
 - [ ] **Step 6: Commit**
@@ -2215,7 +2236,7 @@ describe('Carton sales — offline sync push', () => {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `npm run test:e2e -- carton-sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- carton-sales`
 Expected: FAIL — the first test leaves stock at 47 (and/or 400 on the unknown `saleUnit` property).
 
 - [ ] **Step 3: Add the fields to `SyncInvoiceItemDto`**
@@ -2385,12 +2406,12 @@ and replace the nested stock-deduction loop (`for (const invoice of newInvoices)
 
 - [ ] **Step 7: Run the tests to verify they pass**
 
-Run: `npm run test:e2e -- carton-sales`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- carton-sales`
 Expected: PASS — 27 tests.
 
 - [ ] **Step 8: Verify the existing sync suite still passes**
 
-Run: `npm run test:e2e -- sync`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e -- sync`
 Expected: PASS — the pre-existing `test/sync.e2e-spec.ts` must be unaffected. It covers the idempotency, cross-tenant and overpayment paths that Step 4 and Step 6 touched.
 
 - [ ] **Step 9: Commit**
@@ -2418,7 +2439,7 @@ Expected: PASS — `user.controller.spec.ts`, `user.service.spec.ts`, `carton.ut
 
 - [ ] **Step 2: Run the full e2e suite**
 
-Run: `npm run test:e2e`
+Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e`
 Expected: PASS — all six suites (`cache`, `error-handling`, `ledger-integrity`, `security`, `sync`, `carton-sales`). `ledger-integrity` is the important one: it covers the concurrent-stock and invoice-numbering paths that Tasks 6 and 7 edited.
 
 If anything fails, fix it before continuing. Do not proceed to Step 3 with a red suite.
