@@ -516,3 +516,103 @@ describe('Invoice discount — refused once the debt has payments', () => {
     expect(Number(debtAfter!.remaining)).toBe(40);
   });
 });
+
+describe('Invoice ledger — editing a debt-backed invoice', () => {
+  let ctx: Ctx;
+
+  beforeAll(async () => {
+    ctx = await bootstrap();
+  });
+
+  afterAll(async () => {
+    await teardown(ctx);
+  });
+
+  it('refuses ANY edit of a DEBT invoice once its debt has payments', async () => {
+    // The update path recomputes paid/remaining from paymentMethod and rewrites
+    // the debt from the new total. For DEBT it resets invoice.paid to 0 while
+    // debts.paid keeps the payments — so the next payment writes
+    // paid + remaining != total, trips invoice_balance_consistent, and the debt
+    // can never be settled. A notes-only edit is enough to trigger it.
+    const product = await makeProduct(ctx, 'Notes Edit After Payment');
+    const customer = await ctx.db.customer.create({
+      data: { name: 'Debt Payer', storeId: ctx.storeId },
+    });
+
+    const created = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'DEBT',
+        customerId: customer.id,
+        items: [{ productId: product.id, quantity: 10 }], // 100
+      });
+    expect(created.status).toBe(201);
+
+    const debt = await ctx.db.debt.findFirst({ where: { invoiceId: created.body.id } });
+    const pay = await request(ctx.server)
+      .post(`/api/debts/${debt!.id}/pay`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ amount: 40 });
+    expect(pay.status).toBe(201);
+
+    const res = await request(ctx.server)
+      .patch(`/api/invoices/${created.body.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ notes: 'تصحيح ملاحظة' });
+
+    expect(res.status).toBe(400);
+
+    // The ledger must be exactly as the payment left it.
+    const invoice = await ctx.db.invoice.findUnique({ where: { id: created.body.id } });
+    expect(Number(invoice!.paid)).toBe(40); // NOT reset to 0
+    expect(Number(invoice!.remaining)).toBe(60);
+    expect(Number(invoice!.total)).toBe(100);
+
+    const debtAfter = await ctx.db.debt.findUnique({ where: { id: debt!.id } });
+    expect(Number(debtAfter!.paid)).toBe(40);
+    expect(Number(debtAfter!.remaining)).toBe(60);
+  });
+
+  it('refuses ANY edit of a PARTIAL invoice once its debt has payments', async () => {
+    // For PARTIAL the corruption is silent: the debt recompute subtracts the
+    // already-made payments a second time, every CHECK still passes, and the
+    // customer's outstanding balance is written off with no error anywhere.
+    const product = await makeProduct(ctx, 'Partial Edit After Payment');
+    const customer = await ctx.db.customer.create({
+      data: { name: 'Partial Payer', storeId: ctx.storeId },
+    });
+
+    const created = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'PARTIAL',
+        customerId: customer.id,
+        paid: 30,
+        items: [{ productId: product.id, quantity: 10 }], // 100, debt 70
+      });
+    expect(created.status).toBe(201);
+
+    const debt = await ctx.db.debt.findFirst({ where: { invoiceId: created.body.id } });
+    const pay = await request(ctx.server)
+      .post(`/api/debts/${debt!.id}/pay`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ amount: 20 });
+    expect(pay.status).toBe(201);
+
+    const res = await request(ctx.server)
+      .patch(`/api/invoices/${created.body.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ notes: 'x' });
+
+    expect(res.status).toBe(400);
+
+    // 20 of real customer debt must still be owed, not silently forgiven.
+    const debtAfter = await ctx.db.debt.findUnique({ where: { id: debt!.id } });
+    expect(Number(debtAfter!.amount)).toBe(70);
+    expect(Number(debtAfter!.paid)).toBe(20);
+    expect(Number(debtAfter!.remaining)).toBe(50);
+    expect(debtAfter!.isPaid).toBe(false);
+  });
+});

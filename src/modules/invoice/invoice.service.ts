@@ -446,21 +446,29 @@ export class InvoiceService {
       }
     }
 
-    // Changing the discount moves the invoice total, and the debt recompute
-    // below cannot reconcile that against payments already recorded: a DEBT
-    // invoice has its `paid` reset to 0 while debts.paid keeps them (the next
-    // payment then trips invoice_balance_consistent and the debt becomes
-    // unpayable), and a PARTIAL invoice subtracts them twice and silently
-    // writes the balance off. Refuse instead, the same way a payment-method
-    // change is refused.
-    if (
-      dto.discount !== undefined &&
-      wasDebt &&
-      invoice.debt &&
-      invoice.debt.payments.length > 0
-    ) {
+    // Every update recomputes paid/remaining from paymentMethod (section 5) and
+    // rewrites the linked debt from the new total (section 7d). Neither step can
+    // be reconciled against payments already recorded against that debt, and
+    // neither looks at *what* the caller changed — so a notes-only PATCH is
+    // enough to corrupt the ledger:
+    //
+    //   DEBT     — `paid` is reset to 0 while debts.paid keeps the payments.
+    //              paid + remaining still equals total, so the write is accepted,
+    //              but the invoice now denies money that was collected. The next
+    //              debt payment then trips invoice_balance_consistent, and the
+    //              debt can never be settled (deletePayment can't unwind it
+    //              either — it would drive invoice.paid negative).
+    //   PARTIAL  — the debt recompute subtracts those payments a second time.
+    //              Every CHECK still passes, so the customer's outstanding
+    //              balance is silently written off.
+    //
+    // Refusing the whole update is deliberate. Recomputing `paid` from the
+    // debt's payment rows would be the richer fix, but it reworks the money
+    // math of a live ledger; refusing converts silent corruption into a clear
+    // 400 and matches what a payment-method change above already does.
+    if (wasDebt && invoice.debt && invoice.debt.payments.length > 0) {
       throw new BadRequestException(
-        'لا يمكن تعديل الخصم — الدين عليه دفعات مسجلة. قم بتسوية الدين أولاً.',
+        'لا يمكن تعديل الفاتورة — الدين عليه دفعات مسجلة. قم بتسوية الدين أولاً.',
       );
     }
 
