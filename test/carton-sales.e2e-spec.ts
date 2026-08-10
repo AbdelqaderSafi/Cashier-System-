@@ -705,7 +705,86 @@ describe('Carton sales — invoice update and delete', () => {
     expect(Number(res.body.total)).toBe(69); // 60 + (3 × 3)
 
     const after = await ctx.db.product.findUnique({ where: { id: product.id } });
-    // 60 (start) + 24 (restore old carton line) − 24 (new carton line) − 3 (new unit line)
+    // 36 (stock after the initial 1-carton sale: 60 − 24) + 24 (restore old
+    // carton line) − 24 (new carton line) − 3 (new unit line) = 33
     expect(after!.stock).toBe(33);
+  });
+
+  it('rejects an update whose new carton line exceeds stock, in pieces', async () => {
+    // Stock 20, piecesPerCarton 24. After restoring the old 3-piece line the
+    // product holds 20 pieces, so a 1-carton line needs 24 and must be
+    // refused. This is what pins the deduction predicate to stockQuantity:
+    // with `gte: quantity` the check reads 20 >= 1, passes, drives stock
+    // negative and surfaces as a 500 from the stock_non_negative constraint.
+    const product = await makeCartonProduct('Update Oversell', 20);
+
+    const created = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        items: [{ productId: product.id, quantity: 3 }],
+      });
+    expect(created.status).toBe(201); // stock 17
+
+    const res = await request(ctx.server)
+      .patch(`/api/invoices/${created.body.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ items: [{ productId: product.id, quantity: 1, saleUnit: 'CARTON' }] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('24');
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(17); // rolled back
+  });
+
+  it('restores a pre-migration line by its quantity when items are replaced', async () => {
+    // Mirrors the delete-path legacy test, for update. A line written before
+    // the carton migration has stockQuantity NULL and was always a piece
+    // sale, so quantity is its correct piece count. Without the ?? quantity
+    // fallback this restores 0 and the product silently loses 3 pieces.
+    const product = await ctx.db.product.create({
+      data: {
+        name: 'Legacy Update Restore',
+        price: new Prisma.Decimal(10),
+        wholesalePrice: new Prisma.Decimal(6),
+        stock: 37,
+        storeId: ctx.storeId,
+      },
+    });
+    const invoice = await ctx.db.invoice.create({
+      data: {
+        number: 90002,
+        total: new Prisma.Decimal(30),
+        paid: new Prisma.Decimal(30),
+        remaining: new Prisma.Decimal(0),
+        paymentMethod: 'CASH',
+        storeId: ctx.storeId,
+        items: {
+          create: {
+            productName: 'Legacy Update Restore',
+            price: new Prisma.Decimal(10),
+            unitCost: new Prisma.Decimal(6),
+            quantity: 3,
+            total: new Prisma.Decimal(30),
+            productId: product.id,
+          },
+        },
+      },
+    });
+    await ctx.db.$executeRaw`
+      UPDATE invoice_items SET "stockQuantity" = NULL WHERE "invoiceId" = ${invoice.id}
+    `;
+
+    const res = await request(ctx.server)
+      .patch(`/api/invoices/${invoice.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ items: [{ productId: product.id, quantity: 5 }] });
+
+    expect(res.status).toBe(200);
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(35); // 37 + 3 restored − 5 deducted
   });
 });
