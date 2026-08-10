@@ -315,3 +315,55 @@ describe('Invoice discount — create and update', () => {
     expect(Number(res.body.total)).toBe(90); // 100 − 10
   });
 });
+
+describe('Invoice discount — profit reporting', () => {
+  let ctx: Ctx;
+
+  beforeAll(async () => {
+    ctx = await bootstrap();
+  });
+
+  afterAll(async () => {
+    await teardown(ctx);
+  });
+
+  it('subtracts the discount from reported revenue and profit', async () => {
+    // Without this, every shekel discounted is booked as phantom profit: the
+    // line sum says 60 while the till actually took 50.
+    const product = await makeProduct(ctx, 'Reported Discount');
+
+    const created = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        discount: 10,
+        items: [{ productId: product.id, quantity: 6 }],
+      });
+    expect(created.status).toBe(201);
+
+    const res = await request(ctx.server)
+      .get('/api/reports/daily-profit')
+      .set('Authorization', `Bearer ${ctx.token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.totalRevenue).toBe(50); // 60 gross − 10 discount
+    expect(res.body.totalCost).toBe(36); // 6 × 6 — a discount does not change cost
+    expect(res.body.netProfit).toBe(14); // 50 − 36
+  });
+
+  it('agrees with the daily-sales summary', async () => {
+    // Both endpoints should report the same money. Before this fix they
+    // disagreed by exactly the discount total.
+    const profit = await request(ctx.server)
+      .get('/api/reports/daily-profit')
+      .set('Authorization', `Bearer ${ctx.token}`);
+    const sales = await request(ctx.server)
+      .get('/api/invoices/daily-sales')
+      .set('Authorization', `Bearer ${ctx.token}`);
+
+    expect(profit.status).toBe(200);
+    expect(sales.status).toBe(200);
+    expect(Number(sales.body.summary.totalSales)).toBe(profit.body.totalRevenue);
+  });
+});

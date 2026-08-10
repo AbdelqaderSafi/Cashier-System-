@@ -23,7 +23,7 @@ export class ReportsService {
   /**
    * Calculates the net profit for a given calendar day.
    *
-   * Revenue = Σ (item.price × item.quantity)
+   * Revenue = Σ (item.price × item.quantity) − Σ (invoice.discount)
    * Cost    = Σ (item.unitCost × item.quantity)
    * Profit  = Revenue − Cost
    *
@@ -77,7 +77,19 @@ export class ReportsService {
         AND  i.date BETWEEN ${dayStart} AND ${dayEnd}
     `;
 
-    const totalRevenue = Number(result._sum.total ?? 0);
+    // Invoice-level discounts live on the invoice, not on its lines, so the
+    // line-sum revenue above is the GROSS. Subtract the day's discounts or
+    // every discount given is reported as profit.
+    const discountRows = await this.db.$queryRaw<{ total_discount: string }[]>`
+      SELECT COALESCE(SUM(i."discount"), 0)::text AS total_discount
+      FROM   invoices i
+      WHERE  i."storeId" = ${sid}
+        AND  i.date BETWEEN ${dayStart} AND ${dayEnd}
+    `;
+
+    const grossRevenue = Number(result._sum.total ?? 0);
+    const totalDiscount = Number(discountRows[0]?.total_discount ?? 0);
+    const totalRevenue = grossRevenue - totalDiscount;
     const totalCost = Number(costRows[0]?.total_cost ?? 0);
     const netProfit = +(totalRevenue - totalCost).toFixed(2);
 

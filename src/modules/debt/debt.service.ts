@@ -118,6 +118,7 @@ export class DebtService {
             number: true,
             date: true,
             total: true,
+            discount: true,
             paymentMethod: true,
             notes: true,
           },
