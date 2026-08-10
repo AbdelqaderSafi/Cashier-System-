@@ -140,6 +140,8 @@ export class CustomerService {
                 price: true,
                 quantity: true,
                 total: true,
+                saleUnit: true,
+                stockQuantity: true,
               },
             },
           },

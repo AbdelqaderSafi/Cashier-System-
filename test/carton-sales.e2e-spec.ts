@@ -788,3 +788,77 @@ describe('Carton sales — invoice update and delete', () => {
     expect(after!.stock).toBe(35); // 37 + 3 restored − 5 deducted
   });
 });
+
+describe('Carton sales — read responses expose the line unit', () => {
+  let ctx: Ctx;
+  let invoiceId: string;
+  let invoiceNumber: number;
+  let customerId: string;
+
+  beforeAll(async () => {
+    ctx = await bootstrap();
+
+    const product = await ctx.db.product.create({
+      data: {
+        name: 'Response Check',
+        price: new Prisma.Decimal(3),
+        wholesalePrice: new Prisma.Decimal(2),
+        stock: 48,
+        piecesPerCarton: 24,
+        cartonPurchasePrice: new Prisma.Decimal(48),
+        cartonSalePrice: new Prisma.Decimal(60),
+        storeId: ctx.storeId,
+      },
+    });
+    const customer = await ctx.db.customer.create({
+      data: { name: 'Carton Buyer', storeId: ctx.storeId },
+    });
+    customerId = customer.id;
+
+    const created = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'DEBT',
+        customerId,
+        items: [{ productId: product.id, quantity: 1, saleUnit: 'CARTON' }],
+      });
+    expect(created.status).toBe(201);
+    invoiceId = created.body.id;
+    invoiceNumber = created.body.number;
+  });
+
+  afterAll(async () => {
+    await teardown(ctx);
+  });
+
+  it('returns saleUnit and stockQuantity from GET /invoices/:id', async () => {
+    const res = await request(ctx.server)
+      .get(`/api/invoices/${invoiceId}`)
+      .set('Authorization', `Bearer ${ctx.token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.items[0].saleUnit).toBe('CARTON');
+    expect(res.body.items[0].stockQuantity).toBe(24);
+  });
+
+  it('returns saleUnit and stockQuantity from GET /invoices/number/:number', async () => {
+    const res = await request(ctx.server)
+      .get(`/api/invoices/number/${invoiceNumber}`)
+      .set('Authorization', `Bearer ${ctx.token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.items[0].saleUnit).toBe('CARTON');
+    expect(res.body.items[0].stockQuantity).toBe(24);
+  });
+
+  it('returns saleUnit and stockQuantity in the customer invoice history', async () => {
+    const res = await request(ctx.server)
+      .get(`/api/customers/${customerId}`)
+      .set('Authorization', `Bearer ${ctx.token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.invoices[0].items[0].saleUnit).toBe('CARTON');
+    expect(res.body.invoices[0].items[0].stockQuantity).toBe(24);
+  });
+});
