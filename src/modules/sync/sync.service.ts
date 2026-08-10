@@ -9,7 +9,7 @@ import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { Cache } from 'cache-manager';
 import { Prisma } from 'generated/prisma/client';
 import { DatabaseService } from '../database/database.service';
-import { SyncPushDto } from './dto/sync-push.dto';
+import { SyncPushDto, SyncInvoiceItemDto } from './dto/sync-push.dto';
 import { CacheKeys, CacheTtl } from '../../common/cache/cache-keys';
 import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
 
@@ -104,6 +104,48 @@ export class SyncService {
   //               hard reject (4xx) — no more silent capping.
   // Atomicity:    one `$transaction` wraps everything; any failure rolls back.
 
+  /**
+   * Pieces to deduct for one offline line.
+   *
+   * Priority: a `UNIT` line's `quantity` IS its piece count by definition, so
+   * that is decided first and a client-sent `stockQuantity` is never
+   * consulted for it — honouring it there could only be wrong. For a
+   * `CARTON` line, an explicit `stockQuantity` from the device wins (it is
+   * what the device actually reserved against its local copy), then a
+   * server-side recompute from the product's carton size, then the raw
+   * quantity.
+   *
+   * A CARTON line on a product with no carton size means the product was
+   * converted back to piece-only while the device was offline. The sale
+   * already happened on the ground, so we log the discrepancy and deduct
+   * pieces rather than rejecting and losing the record — the same policy the
+   * stock-drift warning below already applies.
+   */
+  private syncStockPieces(
+    item: SyncInvoiceItemDto,
+    cartonSizeByProductId: Map<string, number | null>,
+  ): number {
+    // A piece line's quantity IS its piece count, so a client-sent
+    // stockQuantity can only be wrong here — honouring it would let an
+    // outbox bug that computes stockQuantity without checking saleUnit
+    // silently deduct a whole carton for a single-piece sale.
+    if (item.saleUnit !== 'CARTON') return item.quantity;
+    if (item.stockQuantity != null) return item.stockQuantity;
+
+    const piecesPerCarton = item.productId
+      ? cartonSizeByProductId.get(item.productId)
+      : null;
+    if (piecesPerCarton == null) {
+      this.logger.warn(
+        `[sync/push] Carton line for product ${item.productId ?? 'unknown'} has no ` +
+          'piecesPerCarton and no client stockQuantity — deducting raw quantity. ' +
+          'Flag inventory discrepancy out-of-band.',
+      );
+      return item.quantity;
+    }
+    return item.quantity * piecesPerCarton;
+  }
+
   async push(sid: string, dto: SyncPushDto) {
     // ── Defensive in-payload dedup ──────────────────────────────────────────
     // A buggy/retry-happy client could ship the same record twice inside one
@@ -171,17 +213,25 @@ export class SyncService {
           }
         }
 
+        // Same ownership check as before, but we keep the carton size while
+        // we're here — an offline carton line has to be converted to pieces
+        // and there is no reason to pay for a second round-trip.
+        const cartonSizeByProductId = new Map<string, number | null>();
         if (productIdsReferenced.size > 0) {
-          const valid = await tx.product.count({
+          const rows = await tx.product.findMany({
             where: {
               id: { in: [...productIdsReferenced] },
               storeId: sid,
             },
+            select: { id: true, piecesPerCarton: true },
           });
-          if (valid !== productIdsReferenced.size) {
+          if (rows.length !== productIdsReferenced.size) {
             throw new ForbiddenException(
               'أحد المنتجات في الـ payload لا ينتمي إلى متجرك',
             );
+          }
+          for (const row of rows) {
+            cartonSizeByProductId.set(row.id, row.piecesPerCarton);
           }
         }
 
@@ -237,6 +287,26 @@ export class SyncService {
             const firstNumber =
               store.lastInvoiceNumber - newInvoices.length + 1;
 
+            // Unlike total/paid/remaining, nothing at the DB layer polices
+            // discount (only `@Min(0)` on the DTO), and it feeds
+            // daily-profit directly — a device bug pushing a discount larger
+            // than the invoice's own line sum would make reported revenue
+            // negative with no error and no trace. The sale already
+            // happened offline, so warn rather than reject and lose the
+            // whole batch.
+            for (const invoice of newInvoices) {
+              const lineSum = invoice.items.reduce(
+                (acc, item) => acc.plus(new Prisma.Decimal(item.total)),
+                new Prisma.Decimal(0),
+              );
+              const discount = new Prisma.Decimal(invoice.discount ?? 0);
+              if (discount.gt(lineSum)) {
+                this.logger.warn(
+                  `[sync/push] Invoice ${invoice.id} discount (${discount.toString()}) exceeds its line sum (${lineSum.toString()}).`,
+                );
+              }
+            }
+
             // No `skipDuplicates` — with the advisory lock + scoped pre-fetch
             // above, every id in `newInvoices` is guaranteed not to exist for
             // this store. If a duplicate somehow reached this INSERT it would
@@ -251,6 +321,7 @@ export class SyncService {
                 total: new Prisma.Decimal(invoice.total),
                 paid: new Prisma.Decimal(invoice.paid),
                 remaining: new Prisma.Decimal(invoice.remaining),
+                discount: new Prisma.Decimal(invoice.discount ?? 0),
                 paymentMethod: invoice.paymentMethod,
                 notes: invoice.notes ?? null,
                 customerId: invoice.customerId ?? null,
@@ -259,7 +330,9 @@ export class SyncService {
             });
 
             // Flatten every item from every new invoice into a single
-            // bulk insert.
+            // bulk insert. stockQuantity is resolved once here and reused for
+            // the deduction below, so the row and the ledger can never
+            // disagree.
             const allItems = newInvoices.flatMap((invoice) =>
               invoice.items.map((item) => ({
                 id: item.id,
@@ -269,6 +342,8 @@ export class SyncService {
                 unitCost: new Prisma.Decimal(item.unitCost ?? 0),
                 quantity: item.quantity,
                 total: new Prisma.Decimal(item.total),
+                saleUnit: item.saleUnit ?? 'UNIT',
+                stockQuantity: this.syncStockPieces(item, cartonSizeByProductId),
                 productId: item.productId ?? null,
                 invoiceId: invoice.id,
               })),
@@ -280,28 +355,26 @@ export class SyncService {
               await tx.invoiceItem.createMany({ data: allItems });
             }
 
-            // Atomic per-item stock deduction. Offline-sync semantics: if
-            // online stock has drifted too low, the row is left untouched
-            // and the discrepancy is logged — the sale itself still
+            // Atomic per-item stock deduction, in pieces. Offline-sync
+            // semantics: if online stock has drifted too low, the row is left
+            // untouched and the discrepancy is logged — the sale itself still
             // persists (it really happened).
-            for (const invoice of newInvoices) {
-              for (const item of invoice.items) {
-                if (!item.productId) continue;
-                const { count } = await tx.product.updateMany({
-                  where: {
-                    id: item.productId,
-                    storeId: sid,
-                    stock: { gte: item.quantity },
-                  },
-                  data: { stock: { decrement: item.quantity } },
-                });
-                if (count === 0) {
-                  this.logger.warn(
-                    `[sync/push] Stock-deduction skipped for product ${item.productId} on invoice ${invoice.id}. ` +
-                      'Likely cause: product deleted/disabled or stock fell below the offline sale quantity. ' +
-                      'Flag inventory discrepancy out-of-band.',
-                  );
-                }
+            for (const item of allItems) {
+              if (!item.productId) continue;
+              const { count } = await tx.product.updateMany({
+                where: {
+                  id: item.productId,
+                  storeId: sid,
+                  stock: { gte: item.stockQuantity },
+                },
+                data: { stock: { decrement: item.stockQuantity } },
+              });
+              if (count === 0) {
+                this.logger.warn(
+                  `[sync/push] Stock-deduction skipped for product ${item.productId} on invoice ${item.invoiceId}. ` +
+                    'Likely cause: product deleted/disabled or stock fell below the offline sale quantity. ' +
+                    'Flag inventory discrepancy out-of-band.',
+                );
               }
             }
 

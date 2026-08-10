@@ -6,6 +6,7 @@
     "^(\\.{1,2}/.*)\\.js$": "$1"
   },
   "testEnvironment": "node",
+  "globalSetup": "<rootDir>/guard-local-db.ts",
   "testRegex": ".e2e-spec.ts$",
   "transform": {
     "^.+\\.(t|j)s$": "ts-jest"

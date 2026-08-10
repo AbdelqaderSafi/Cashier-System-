@@ -15,7 +15,7 @@ import {
   IsNotEmpty,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { PaymentMethod } from 'generated/prisma/client';
+import { PaymentMethod, SaleUnit } from 'generated/prisma/client';
 
 export class UpdateInvoiceItemDto {
   @ApiPropertyOptional({ example: 'product-uuid', description: 'معرّف المنتج' })
@@ -29,6 +29,17 @@ export class UpdateInvoiceItemDto {
   @Min(1)
   @Type(() => Number)
   quantity!: number;
+
+  @ApiPropertyOptional({
+    enum: SaleUnit,
+    example: 'UNIT',
+    default: 'UNIT',
+    description:
+      'وحدة البيع — UNIT: قطعة (الافتراضي عند عدم الإرسال) | CARTON: كرتونة كاملة',
+  })
+  @IsOptional()
+  @IsEnum(SaleUnit)
+  saleUnit?: SaleUnit;
 }
 
 export class UpdateInvoiceDto {
@@ -77,4 +88,15 @@ export class UpdateInvoiceDto {
   @ValidateNested({ each: true })
   @Type(() => UpdateInvoiceItemDto)
   items?: UpdateInvoiceItemDto[];
+
+  @ApiPropertyOptional({
+    example: 20,
+    description:
+      'خصم جديد على الفاتورة كاملة. إذا لم يُرسل يبقى الخصم الحالي كما هو',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  discount?: number;
 }

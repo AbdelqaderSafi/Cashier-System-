@@ -11,6 +11,8 @@ import { UpdateInvoiceDto } from './dto/update-invoice.dto';
 import { InvoiceQueryDto } from './dto/invoice-query.dto';
 import { paginate, paginatedResponse } from '../../common/utils/pagination';
 import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
+import { buildInvoiceItem, stockPiecesOf, type BuiltInvoiceItem } from './invoice-item.util';
+import { applyInvoiceDiscount } from './invoice-discount.util';
 
 export type PaginatedInvoices = {
   data: Invoice[];
@@ -71,7 +73,12 @@ export class InvoiceService {
       if (!customer) throw new NotFoundException('العميل غير موجود');
     }
 
-    const productIds = dto.items.map((i) => i.productId);
+    // Dedupe before the existence check — a carton line and a loose-piece
+    // line of the SAME product are two separate dto.items entries. Without
+    // this, `products` (deduped by the DB) and `productIds` (not deduped)
+    // would never match in length, and a perfectly valid two-line sale would
+    // 404 as "product not found".
+    const productIds = [...new Set(dto.items.map((i) => i.productId))];
     const products = await this.db.product.findMany({
       where: { id: { in: productIds }, storeId: sid, isActive: true },
     });
@@ -86,27 +93,26 @@ export class InvoiceService {
 
     const productMap = new Map(products.map((p) => [p.id, p]));
 
-    // Build invoice items with Decimal arithmetic — no float drift.
-    const invoiceItems = dto.items.map((item) => {
-      const product = productMap.get(item.productId)!;
-      const price = new Prisma.Decimal(product.price);
-      const unitCost = new Prisma.Decimal(product.wholesalePrice);
-      const itemTotal = price.times(item.quantity);
-      return {
-        productName: product.name,
-        barcode: product.barcode,
-        price,
-        unitCost,
-        quantity: item.quantity,
-        total: itemTotal,
-        productId: product.id,
-      };
-    });
+    // Build invoice items from the DB product rows — prices, costs and carton
+    // sizes are never taken from the request. Decimal arithmetic throughout,
+    // no float drift.
+    const invoiceItems = dto.items.map((item) =>
+      buildInvoiceItem(
+        productMap.get(item.productId)!,
+        item.quantity,
+        item.saleUnit,
+      ),
+    );
 
-    const total = invoiceItems.reduce(
+    // The line sum is the GROSS. What gets stored as `total` is the net after
+    // the invoice discount — invoice_balance_consistent enforces
+    // paid + remaining = total, so paying the net against a gross total would
+    // be rejected by the database.
+    const grossTotal = invoiceItems.reduce(
       (acc, item) => acc.plus(item.total),
       new Prisma.Decimal(0),
     );
+    const { discount, total } = applyInvoiceDiscount(grossTotal, dto.discount);
 
     let paid: Prisma.Decimal;
     let remaining: Prisma.Decimal;
@@ -125,7 +131,7 @@ export class InvoiceService {
         const paidAmount = new Prisma.Decimal(dto.paid!);
         if (paidAmount.gte(total)) {
           throw new BadRequestException(
-            'المبلغ المدفوع يجب أن يكون أقل من إجمالي الفاتورة عند الدفع الجزئي',
+            `المبلغ المدفوع يجب أن يكون أقل من المبلغ المستحق بعد الخصم (${total.toString()}) عند الدفع الجزئي`,
           );
         }
         if (paidAmount.lte(0)) {
@@ -169,32 +175,36 @@ export class InvoiceService {
         //    couldn't be deducted (insufficient stock or product gone), we
         //    bail out and the transaction rolls back.
         // Per-item conditional updateMany — each one is a single atomic
-        // UPDATE on the row with a `stock >= qty` predicate, so two concurrent
-        // sales of the last unit can't both pass.
-        for (const item of dto.items) {
+        // UPDATE on the row with a `stock >= pieces` predicate, so two
+        // concurrent sales of the last unit can't both pass. We iterate the
+        // BUILT items, not the DTO, because only they carry stockQuantity
+        // (pieces) — a carton line must move 24 pieces, not 1.
+        for (const item of invoiceItems) {
           const { count } = await tx.product.updateMany({
             where: {
               id: item.productId,
               storeId: sid,
               isActive: true,
-              stock: { gte: item.quantity },
+              stock: { gte: item.stockQuantity },
             },
-            data: { stock: { decrement: item.quantity } },
+            data: { stock: { decrement: item.stockQuantity } },
           });
           if (count === 0) {
             // Diagnose why the conditional failed.
-            const p = productMap.get(item.productId);
             const live = await tx.product.findFirst({
               where: { id: item.productId, storeId: sid },
               select: { stock: true, name: true, isActive: true },
             });
             if (!live || !live.isActive) {
               throw new BadRequestException(
-                `المنتج "${p?.name ?? item.productId}" غير متوفر أو معطّل`,
+                `المنتج "${item.productName}" غير متوفر أو معطّل`,
               );
             }
+            // Always report pieces. A carton line would otherwise read
+            // "الكمية المطلوبة (1) تتجاوز المخزون المتوفر (20)", which makes
+            // no sense to a cashier.
             throw new BadRequestException(
-              `الكمية المطلوبة (${item.quantity}) من "${live.name}" تتجاوز المخزون المتوفر (${live.stock})`,
+              `الكمية المطلوبة (${item.stockQuantity} قطعة) من "${live.name}" تتجاوز المخزون المتوفر (${live.stock} قطعة)`,
             );
           }
         }
@@ -214,6 +224,7 @@ export class InvoiceService {
           data: {
             number: nextNumber,
             total,
+            discount,
             paid,
             remaining,
             paymentMethod: dto.paymentMethod,
@@ -274,7 +285,14 @@ export class InvoiceService {
     const invoice = await this.db.invoice.findFirst({
       where: { id, storeId: sid },
       include: {
-        items: { select: { id: true, productId: true, quantity: true } },
+        items: {
+          select: {
+            id: true,
+            productId: true,
+            quantity: true,
+            stockQuantity: true,
+          },
+        },
         debt: {
           select: {
             id: true,
@@ -317,25 +335,22 @@ export class InvoiceService {
     }
 
     // 4. Build new invoice items (if provided)
-    type NewItem = {
-      productName: string;
-      barcode: string | null;
-      price: Prisma.Decimal;
-      unitCost: Prisma.Decimal;
-      quantity: number;
-      total: Prisma.Decimal;
-      productId: string;
-    };
-
-    let newInvoiceItems: NewItem[] | null = null;
-    let total: Prisma.Decimal = new Prisma.Decimal(invoice.total);
+    let newInvoiceItems: BuiltInvoiceItem[] | null = null;
+    // Start from the stored values. `invoice.total` is already net, so the
+    // gross it came from is total + discount.
+    let discount: Prisma.Decimal = new Prisma.Decimal(invoice.discount);
+    let grossTotal: Prisma.Decimal = new Prisma.Decimal(invoice.total).plus(discount);
 
     if (dto.items !== undefined) {
       if (dto.items.length === 0) {
         throw new BadRequestException('الفاتورة يجب أن تحتوي على بند واحد على الأقل');
       }
 
-      const productIds = dto.items.map((i) => i.productId);
+      // Dedupe before the existence check — a carton line and a loose-piece
+      // line of the SAME product are two separate dto.items entries, and
+      // `products` comes back deduped by the DB. Without this, a valid
+      // two-line update 404s as "product not found". Mirrors create().
+      const productIds = [...new Set(dto.items.map((i) => i.productId))];
       const products = await this.db.product.findMany({
         where: { id: { in: productIds }, storeId: sid, isActive: true },
       });
@@ -350,27 +365,29 @@ export class InvoiceService {
 
       const productMap = new Map(products.map((p) => [p.id, p]));
 
-      newInvoiceItems = dto.items.map((item) => {
-        const product = productMap.get(item.productId)!;
-        const price = new Prisma.Decimal(product.price);
-        const unitCost = new Prisma.Decimal(product.wholesalePrice);
-        const itemTotal = price.times(item.quantity);
-        return {
-          productName: product.name,
-          barcode: product.barcode ?? null,
-          price,
-          unitCost,
-          quantity: item.quantity,
-          total: itemTotal,
-          productId: product.id,
-        };
-      });
+      newInvoiceItems = dto.items.map((item) =>
+        buildInvoiceItem(
+          productMap.get(item.productId)!,
+          item.quantity,
+          item.saleUnit,
+        ),
+      );
 
-      total = newInvoiceItems.reduce(
+      grossTotal = newInvoiceItems.reduce(
         (acc, item) => acc.plus(item.total),
         new Prisma.Decimal(0),
       );
     }
+
+    // An omitted discount keeps the stored one, re-applied to whatever the
+    // gross is now — otherwise editing a discounted invoice would silently
+    // revert its total to the gross and overcharge the customer.
+    const applied = applyInvoiceDiscount(
+      grossTotal,
+      dto.discount !== undefined ? dto.discount : discount,
+    );
+    discount = applied.discount;
+    const total = applied.total;
 
     // 5. Calculate paid / remaining
     let paid: Prisma.Decimal;
@@ -394,7 +411,7 @@ export class InvoiceService {
             : new Prisma.Decimal(invoice.paid);
         if (paidAmount.gte(total)) {
           throw new BadRequestException(
-            'المبلغ المدفوع يجب أن يكون أقل من إجمالي الفاتورة عند الدفع الجزئي',
+            `المبلغ المدفوع يجب أن يكون أقل من المبلغ المستحق بعد الخصم (${total.toString()}) عند الدفع الجزئي`,
           );
         }
         if (paidAmount.lte(0)) {
@@ -429,35 +446,51 @@ export class InvoiceService {
       }
     }
 
+    // Changing the discount moves the invoice total, and the debt recompute
+    // below cannot reconcile that against payments already recorded: a DEBT
+    // invoice has its `paid` reset to 0 while debts.paid keeps them (the next
+    // payment then trips invoice_balance_consistent and the debt becomes
+    // unpayable), and a PARTIAL invoice subtracts them twice and silently
+    // writes the balance off. Refuse instead, the same way a payment-method
+    // change is refused.
+    if (
+      dto.discount !== undefined &&
+      wasDebt &&
+      invoice.debt &&
+      invoice.debt.payments.length > 0
+    ) {
+      throw new BadRequestException(
+        'لا يمكن تعديل الخصم — الدين عليه دفعات مسجلة. قم بتسوية الدين أولاً.',
+      );
+    }
+
     // 7. Execute everything in a single transaction
     const result = await this.db.$transaction(
       async (tx) => {
         if (newInvoiceItems !== null) {
-          // a. Restore stock for all OLD items in one atomic UPDATE.
           // a. Restore stock for all OLD items. updateMany per item — each
-          //    one is a single atomic UPDATE.
+          //    one is a single atomic UPDATE. stockPiecesOf() covers lines
+          //    written before carton support, whose stockQuantity is NULL.
           for (const oldItem of invoice.items) {
             if (oldItem.productId) {
               await tx.product.updateMany({
                 where: { id: oldItem.productId, storeId: sid },
-                data: { stock: { increment: oldItem.quantity } },
+                data: { stock: { increment: stockPiecesOf(oldItem) } },
               });
             }
           }
 
-          // b. Atomic conditional deduction for the NEW items. If any line
-          //    can't be deducted, the failed-row count diverges from the
-          //    expected count and we diagnose the cause for a friendly error.
-          // b. Atomic per-item conditional deduction for the NEW items.
+          // b. Atomic per-item conditional deduction for the NEW items, in
+          //    pieces.
           for (const newItem of newInvoiceItems) {
             const { count } = await tx.product.updateMany({
               where: {
                 id: newItem.productId,
                 storeId: sid,
                 isActive: true,
-                stock: { gte: newItem.quantity },
+                stock: { gte: newItem.stockQuantity },
               },
-              data: { stock: { decrement: newItem.quantity } },
+              data: { stock: { decrement: newItem.stockQuantity } },
             });
             if (count === 0) {
               const live = await tx.product.findFirst({
@@ -470,7 +503,7 @@ export class InvoiceService {
                 );
               }
               throw new BadRequestException(
-                `الكمية المطلوبة (${newItem.quantity}) من "${newItem.productName}" تتجاوز المخزون المتوفر (${live.stock})`,
+                `الكمية المطلوبة (${newItem.stockQuantity} قطعة) من "${newItem.productName}" تتجاوز المخزون المتوفر (${live.stock} قطعة)`,
               );
             }
           }
@@ -482,6 +515,7 @@ export class InvoiceService {
           data: {
             paymentMethod,
             total,
+            discount,
             paid,
             remaining,
             customerId,
@@ -638,6 +672,8 @@ export class InvoiceService {
             price: true,
             quantity: true,
             total: true,
+            saleUnit: true,
+            stockQuantity: true,
             productId: true,
           },
         },
@@ -678,6 +714,8 @@ export class InvoiceService {
             price: true,
             quantity: true,
             total: true,
+            saleUnit: true,
+            stockQuantity: true,
             productId: true,
           },
         },
@@ -722,6 +760,7 @@ export class InvoiceService {
         id: true,
         number: true,
         total: true,
+        discount: true,
         paid: true,
         remaining: true,
         paymentMethod: true,
@@ -773,7 +812,7 @@ export class InvoiceService {
     const invoice = await this.db.invoice.findFirst({
       where: { id, storeId: sid },
       include: {
-        items: { select: { productId: true, quantity: true } },
+        items: { select: { productId: true, quantity: true, stockQuantity: true } },
         debt: { select: { id: true, isPaid: true, payments: { select: { id: true } } } },
       },
     });
@@ -792,7 +831,7 @@ export class InvoiceService {
           if (item.productId) {
             await tx.product.updateMany({
               where: { id: item.productId, storeId: sid },
-              data: { stock: { increment: item.quantity } },
+              data: { stock: { increment: stockPiecesOf(item) } },
             });
           }
         }

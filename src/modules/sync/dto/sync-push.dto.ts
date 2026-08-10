@@ -17,7 +17,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { PaymentMethod } from 'generated/prisma/client';
+import { PaymentMethod, SaleUnit } from 'generated/prisma/client';
 
 // ─── Invoice Item ─────────────────────────────────────────────────────────────
 
@@ -69,6 +69,30 @@ export class SyncInvoiceItemDto {
   @IsOptional()
   @IsUUID()
   productId?: string;
+
+  @ApiPropertyOptional({
+    enum: SaleUnit,
+    example: 'CARTON',
+    default: 'UNIT',
+    description:
+      'وحدة البيع — UNIT: قطعة (الافتراضي) | CARTON: كرتونة كاملة. ' +
+      'عند CARTON تكون الكمية بعدد الكراتين',
+  })
+  @IsOptional()
+  @IsEnum(SaleUnit)
+  saleUnit?: SaleUnit;
+
+  @ApiPropertyOptional({
+    example: 24,
+    description:
+      'عدد القطع المخصومة فعلياً من المخزون. إذا لم يُرسل يحسبه الخادم من بيانات ' +
+      'الكرتونة المخزَّنة في المنتج',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Type(() => Number)
+  stockQuantity?: number;
 }
 
 // ─── Invoice ──────────────────────────────────────────────────────────────────
@@ -102,6 +126,19 @@ export class SyncInvoiceDto {
   @Min(0)
   @Type(() => Number)
   remaining!: number;
+
+  @ApiPropertyOptional({
+    example: 10.0,
+    default: 0,
+    description:
+      'خصم الفاتورة (مبلغ مقطوع). المجموع المرسل total هو الصافي بعد الخصم. ' +
+      'ضروري لصحة التقارير — بدونه يُحتسب الخصم ربحاً',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  discount?: number;
 
   @ApiProperty({ enum: PaymentMethod, example: 'PARTIAL', description: 'طريقة الدفع' })
   @IsEnum(PaymentMethod)

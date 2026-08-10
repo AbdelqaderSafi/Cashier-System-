@@ -15,7 +15,7 @@ import {
   ValidateIf,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { PaymentMethod } from 'generated/prisma/client';
+import { PaymentMethod, SaleUnit } from 'generated/prisma/client';
 
 export class CreateInvoiceItemDto {
   @ApiProperty({ example: 'product-uuid', description: 'معرّف المنتج' })
@@ -29,6 +29,18 @@ export class CreateInvoiceItemDto {
   @Min(1)
   @Type(() => Number)
   quantity!: number;
+
+  @ApiPropertyOptional({
+    enum: SaleUnit,
+    example: 'UNIT',
+    default: 'UNIT',
+    description:
+      'وحدة البيع — UNIT: قطعة (الافتراضي عند عدم الإرسال) | CARTON: كرتونة كاملة. ' +
+      'عند CARTON تكون الكمية بعدد الكراتين ويُخصم من المخزون (الكمية × عدد القطع في الكرتونة)',
+  })
+  @IsOptional()
+  @IsEnum(SaleUnit)
+  saleUnit?: SaleUnit;
 }
 
 export class CreateInvoiceDto {
@@ -52,6 +64,19 @@ export class CreateInvoiceDto {
   @IsPositive()
   @Type(() => Number)
   paid?: number;
+
+  @ApiPropertyOptional({
+    example: 10,
+    default: 0,
+    description:
+      'خصم على الفاتورة كاملة (مبلغ مقطوع). المجموع المخزَّن هو الصافي بعد الخصم. ' +
+      'يجب أن يكون أقل من إجمالي البنود',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  discount?: number;
 
   @ApiPropertyOptional({
     example: 'customer-uuid',

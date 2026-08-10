@@ -85,6 +85,12 @@ model Product {
   wholesalePrice Decimal  @default(0) @db.Decimal(10, 2) // Cost / purchase price
   stock          Int      @default(0)
   minStock       Int      @default(5) // Low stock alert threshold
+  // Carton definition — all three are set together or all left NULL.
+  // NULL across the board means "this product is not sold by the carton",
+  // which is every product that existed before this migration.
+  piecesPerCarton     Int?
+  cartonPurchasePrice Decimal? @db.Decimal(10, 2)
+  cartonSalePrice     Decimal? @db.Decimal(10, 2)
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -139,6 +145,11 @@ model Invoice {
   number        Int
   date          DateTime      @default(now())
   total         Decimal       @db.Decimal(10, 2)
+  // Fixed-amount discount applied to the whole invoice at sale time.
+  // `total` above is the NET (gross line sum − discount) because
+  // invoice_balance_consistent requires paid + remaining = total; the gross
+  // is derived as total + discount when a caller needs it.
+  discount      Decimal       @default(0) @db.Decimal(10, 2)
   paid          Decimal       @default(0) @db.Decimal(10, 2)
   remaining     Decimal       @default(0) @db.Decimal(10, 2)
   paymentMethod PaymentMethod @default(CASH)
@@ -181,6 +192,14 @@ enum PaymentMethod {
   PARTIAL   // Partial payment
 }
 
+// Whether an invoice line was sold as a loose piece or as a whole carton.
+// Lines created before carton support existed are all piece sales, which is
+// what the column default gives them.
+enum SaleUnit {
+  UNIT
+  CARTON
+}
+
 // Invoice items
 model InvoiceItem {
   id          String  @id @default(uuid())
@@ -190,6 +209,17 @@ model InvoiceItem {
   unitCost    Decimal @default(0) @db.Decimal(10, 2) // Cost frozen at sale time
   quantity    Int
   total       Decimal @db.Decimal(10, 2)
+
+  // Historical snapshot of how this line was sold. `quantity` is counted in
+  // `saleUnit`s (pieces or cartons); `stockQuantity` is always in pieces and
+  // is the amount the stock ledger moved by.
+  //
+  // stockQuantity is NULLable rather than backfilled: its correct historical
+  // value is per-row (= quantity), which no constant default can express, and
+  // backfilling would mean writing to every existing line on production.
+  // Read it through stockPiecesOf() in invoice-item.util.ts.
+  saleUnit      SaleUnit @default(UNIT)
+  stockQuantity Int?
 
   // Foreign keys
   invoiceId   String

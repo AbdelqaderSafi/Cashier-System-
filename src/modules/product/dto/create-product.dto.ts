@@ -47,7 +47,13 @@ export class CreateProductDto {
   @Type(() => Number)
   wholesalePrice?: number;
 
-  @ApiPropertyOptional({ example: 100, default: 0, description: 'كمية المخزون الابتدائية' })
+  @ApiPropertyOptional({
+    example: 100,
+    default: 0,
+    description:
+      'كمية المخزون الابتدائية بالقطع. في وضع الكرتونة تعني القطع الفرط الإضافية ' +
+      'وتُضاف فوق قطع الكراتين',
+  })
   @IsOptional()
   @IsInt()
   @Min(0)
@@ -64,4 +70,47 @@ export class CreateProductDto {
   @Min(0)
   @Type(() => Number)
   minStock?: number;
+
+  @ApiPropertyOptional({
+    example: 24,
+    description:
+      'عدد القطع في الكرتونة — يُرسل مع سعر شراء الكرتونة وسعر بيع الكرتونة معاً أو لا يُرسل أي منها',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Type(() => Number)
+  piecesPerCarton?: number;
+
+  @ApiPropertyOptional({
+    example: 2,
+    description:
+      'عدد الكراتين المشتراة — يُستخدم لحساب المخزون الابتدائي فقط ولا يُخزَّن. ' +
+      'المخزون = (عدد الكراتين × عدد القطع في الكرتونة) + الكمية المرسلة كقطع فرط',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Type(() => Number)
+  cartonCount?: number;
+
+  @ApiPropertyOptional({
+    example: 48,
+    description: 'سعر شراء الكرتونة — يُشتق منه سعر الجملة للقطعة الواحدة',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  cartonPurchasePrice?: number;
+
+  @ApiPropertyOptional({
+    example: 60,
+    description: 'سعر بيع الكرتونة الكاملة',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @IsPositive()
+  @Type(() => Number)
+  cartonSalePrice?: number;
 }

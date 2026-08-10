@@ -3,6 +3,7 @@ import {
   Injectable,
   ConflictException,
   NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { Cache } from 'cache-manager';
@@ -14,6 +15,12 @@ import { ProductQueryDto } from './dto/product-query.dto';
 import { paginate, paginatedResponse } from '../../common/utils/pagination';
 import { CacheKeys, CacheTtl } from '../../common/cache/cache-keys';
 import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
+import {
+  assertCartonGroupValid,
+  isCartonGroupComplete,
+  openingStockFromCartons,
+  unitCostFromCarton,
+} from './carton.util';
 
 export type PaginatedProducts = {
   data: Product[];
@@ -56,14 +63,41 @@ export class ProductService {
       await this.assertBarcodeUnique(sid, dto.barcode);
     }
 
+    assertCartonGroupValid(dto);
+
+    if (dto.cartonCount != null && dto.piecesPerCarton == null) {
+      throw new BadRequestException(
+        'عدد الكراتين يتطلب تحديد عدد القطع في الكرتونة',
+      );
+    }
+
+    // In carton mode the server owns both derived columns. `stock` from the
+    // request means loose pieces held outside a full carton, so it adds on
+    // top; `wholesalePrice` is always recomputed so per-piece profit can never
+    // drift away from the carton figures the owner actually entered.
+    const isCarton = isCartonGroupComplete(dto);
+    const stock = isCarton
+      ? openingStockFromCartons(
+          dto.cartonCount ?? 0,
+          dto.piecesPerCarton!,
+          dto.stock ?? 0,
+        )
+      : dto.stock ?? 0;
+    const wholesalePrice = isCarton
+      ? unitCostFromCarton(dto.cartonPurchasePrice!, dto.piecesPerCarton!)
+      : dto.wholesalePrice ?? 0;
+
     const created = await this.db.product.create({
       data: {
         name: dto.name,
         barcode: dto.barcode ?? null,
         price: dto.price,
-        wholesalePrice: dto.wholesalePrice ?? 0,
-        stock: dto.stock ?? 0,
+        wholesalePrice,
+        stock,
         minStock: dto.minStock ?? 5,
+        piecesPerCarton: dto.piecesPerCarton ?? null,
+        cartonPurchasePrice: dto.cartonPurchasePrice ?? null,
+        cartonSalePrice: dto.cartonSalePrice ?? null,
         storeId: sid,
       },
     });
@@ -153,6 +187,7 @@ export class ProductService {
             quantity: true,
             price: true,
             total: true,
+            saleUnit: true,
             invoice: {
               select: { id: true, number: true, date: true },
             },
@@ -173,10 +208,17 @@ export class ProductService {
   async update(sid: string, id: string, dto: UpdateProductDto): Promise<Product> {
     // Read existing row to learn the old barcode — we need to invalidate it
     // explicitly even if `dto.barcode` is undefined (any update can affect
-    // the cached row's stock/price/isActive fields).
+    // the cached row's stock/price/isActive fields). The carton columns come
+    // along because the group must be validated against the MERGED state.
     const existing = await this.db.product.findFirst({
       where: { id, storeId: sid },
-      select: { id: true, barcode: true },
+      select: {
+        id: true,
+        barcode: true,
+        piecesPerCarton: true,
+        cartonPurchasePrice: true,
+        cartonSalePrice: true,
+      },
     });
     if (!existing) throw new NotFoundException('Product not found');
 
@@ -184,18 +226,63 @@ export class ProductService {
       await this.assertBarcodeUnique(sid, dto.barcode, id);
     }
 
-    const updated = await this.db.product.update({
-      where: { id },
-      data: {
-        ...(dto.name !== undefined && { name: dto.name }),
-        ...(dto.barcode !== undefined && { barcode: dto.barcode }),
-        ...(dto.price !== undefined && { price: dto.price }),
-        ...(dto.wholesalePrice !== undefined && { wholesalePrice: dto.wholesalePrice }),
-        ...(dto.stock !== undefined && { stock: dto.stock }),
-        ...(dto.minStock !== undefined && { minStock: dto.minStock }),
-        ...(dto.isActive !== undefined && { isActive: dto.isActive }),
-      },
-    });
+    // A PATCH that touches only one carton field must still leave a complete
+    // (or entirely empty) group behind, so validate what the row will LOOK
+    // like after the merge rather than what the request carries.
+    const merged = {
+      piecesPerCarton:
+        dto.piecesPerCarton !== undefined
+          ? dto.piecesPerCarton
+          : existing.piecesPerCarton,
+      cartonPurchasePrice:
+        dto.cartonPurchasePrice !== undefined
+          ? dto.cartonPurchasePrice
+          : existing.cartonPurchasePrice,
+      cartonSalePrice:
+        dto.cartonSalePrice !== undefined
+          ? dto.cartonSalePrice
+          : existing.cartonSalePrice,
+    };
+    assertCartonGroupValid(merged);
+
+    const data: Prisma.ProductUpdateInput = {
+      ...(dto.name !== undefined && { name: dto.name }),
+      ...(dto.barcode !== undefined && { barcode: dto.barcode }),
+      ...(dto.price !== undefined && { price: dto.price }),
+      ...(dto.stock !== undefined && { stock: dto.stock }),
+      ...(dto.minStock !== undefined && { minStock: dto.minStock }),
+      ...(dto.isActive !== undefined && { isActive: dto.isActive }),
+      ...(dto.piecesPerCarton !== undefined && {
+        piecesPerCarton: dto.piecesPerCarton,
+      }),
+      ...(dto.cartonPurchasePrice !== undefined && {
+        cartonPurchasePrice: dto.cartonPurchasePrice,
+      }),
+      ...(dto.cartonSalePrice !== undefined && {
+        cartonSalePrice: dto.cartonSalePrice,
+      }),
+    };
+
+    // Stock is deliberately NOT recomputed from cartons here — pieces may
+    // already have been sold out of those cartons. wholesalePrice, on the
+    // other hand, is a pure function of the carton figures, so it is
+    // recomputed whenever either input moves.
+    const cartonInputsTouched =
+      dto.piecesPerCarton !== undefined || dto.cartonPurchasePrice !== undefined;
+    if (
+      cartonInputsTouched &&
+      merged.piecesPerCarton != null &&
+      merged.cartonPurchasePrice != null
+    ) {
+      data.wholesalePrice = unitCostFromCarton(
+        merged.cartonPurchasePrice,
+        merged.piecesPerCarton,
+      );
+    } else if (dto.wholesalePrice !== undefined) {
+      data.wholesalePrice = dto.wholesalePrice;
+    }
+
+    const updated = await this.db.product.update({ where: { id }, data });
 
     // Invalidate both the old and (possibly) new barcode entries.
     void this.cacheInvalidator.invalidateProductBarcode(sid, existing.barcode);
