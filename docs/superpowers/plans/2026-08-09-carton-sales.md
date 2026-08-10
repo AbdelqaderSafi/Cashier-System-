@@ -2190,7 +2190,7 @@ describe('Carton sales — offline sync push', () => {
       .set('Authorization', `Bearer ${ctx.token}`)
       .send(offlineInvoice(product.id, { saleUnit: 'CARTON' }));
 
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(200);
 
     const after = await ctx.db.product.findUnique({ where: { id: product.id } });
     expect(after!.stock).toBe(24); // 48 − 24, not 48 − 1
@@ -2206,7 +2206,7 @@ describe('Carton sales — offline sync push', () => {
         offlineInvoice(product.id, { saleUnit: 'CARTON', stockQuantity: 24 }),
       );
 
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(200);
 
     const after = await ctx.db.product.findUnique({ where: { id: product.id } });
     expect(after!.stock).toBe(24);
@@ -2226,7 +2226,7 @@ describe('Carton sales — offline sync push', () => {
       .set('Authorization', `Bearer ${ctx.token}`)
       .send(offlineInvoice(product.id, {}));
 
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(200);
 
     const after = await ctx.db.product.findUnique({ where: { id: product.id } });
     expect(after!.stock).toBe(47); // 48 − 1 piece
