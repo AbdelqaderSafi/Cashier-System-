@@ -452,6 +452,31 @@ describe('Carton sales — invoice create', () => {
     expect(after!.stock).toBe(3); // 30 − 24 − 3
   });
 
+  it('rejects the second line when the first line already consumed the stock', async () => {
+    // 26 pieces: the carton line takes 24, leaving 2 — so the 3-piece line
+    // must fail. This is what proves each line's conditional deduction sees
+    // the previous line's write; with stock to spare the test would pass
+    // even if the lines were evaluated against the original stock.
+    const product = await makeCartonProduct('Intra Invoice Oversell', 26);
+
+    const res = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        items: [
+          { productId: product.id, quantity: 1, saleUnit: 'CARTON' },
+          { productId: product.id, quantity: 3, saleUnit: 'UNIT' },
+        ],
+      });
+
+    expect(res.status).toBe(400);
+
+    // The whole transaction must roll back — not just the failing line.
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(26);
+  });
+
   it('rejects a carton sale that exceeds stock, reporting pieces not cartons', async () => {
     const product = await makeCartonProduct('Short Stock', 20);
 
@@ -493,6 +518,27 @@ describe('Carton sales — invoice create', () => {
       });
 
     expect(res.status).toBe(400);
+    expect(res.body.message).toContain('غير معرّف كمنتج كرتونة');
+  });
+
+  it('rejects an unrecognised saleUnit rather than falling back to piece pricing', async () => {
+    // Guards the DTO's @IsEnum: without it, an unrecognised value would fall
+    // through buildInvoiceItem's CARTON check into the UNIT branch and sell a
+    // carton at the piece price.
+    const product = await makeCartonProduct('Bad Sale Unit', 48);
+
+    const res = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        items: [{ productId: product.id, quantity: 1, saleUnit: 'carton' }],
+      });
+
+    expect(res.status).toBe(400);
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(48); // nothing sold
   });
 
   it('reports carton profit correctly (carton price × cartons − carton cost × cartons)', async () => {
