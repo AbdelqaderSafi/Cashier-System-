@@ -11,6 +11,7 @@ import { UpdateInvoiceDto } from './dto/update-invoice.dto';
 import { InvoiceQueryDto } from './dto/invoice-query.dto';
 import { paginate, paginatedResponse } from '../../common/utils/pagination';
 import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
+import { buildInvoiceItem } from './invoice-item.util';
 
 export type PaginatedInvoices = {
   data: Invoice[];
@@ -71,7 +72,12 @@ export class InvoiceService {
       if (!customer) throw new NotFoundException('العميل غير موجود');
     }
 
-    const productIds = dto.items.map((i) => i.productId);
+    // Dedupe before the existence check — a carton line and a loose-piece
+    // line of the SAME product are two separate dto.items entries. Without
+    // this, `products` (deduped by the DB) and `productIds` (not deduped)
+    // would never match in length, and a perfectly valid two-line sale would
+    // 404 as "product not found".
+    const productIds = [...new Set(dto.items.map((i) => i.productId))];
     const products = await this.db.product.findMany({
       where: { id: { in: productIds }, storeId: sid, isActive: true },
     });
@@ -86,22 +92,16 @@ export class InvoiceService {
 
     const productMap = new Map(products.map((p) => [p.id, p]));
 
-    // Build invoice items with Decimal arithmetic — no float drift.
-    const invoiceItems = dto.items.map((item) => {
-      const product = productMap.get(item.productId)!;
-      const price = new Prisma.Decimal(product.price);
-      const unitCost = new Prisma.Decimal(product.wholesalePrice);
-      const itemTotal = price.times(item.quantity);
-      return {
-        productName: product.name,
-        barcode: product.barcode,
-        price,
-        unitCost,
-        quantity: item.quantity,
-        total: itemTotal,
-        productId: product.id,
-      };
-    });
+    // Build invoice items from the DB product rows — prices, costs and carton
+    // sizes are never taken from the request. Decimal arithmetic throughout,
+    // no float drift.
+    const invoiceItems = dto.items.map((item) =>
+      buildInvoiceItem(
+        productMap.get(item.productId)!,
+        item.quantity,
+        item.saleUnit,
+      ),
+    );
 
     const total = invoiceItems.reduce(
       (acc, item) => acc.plus(item.total),
@@ -169,32 +169,36 @@ export class InvoiceService {
         //    couldn't be deducted (insufficient stock or product gone), we
         //    bail out and the transaction rolls back.
         // Per-item conditional updateMany — each one is a single atomic
-        // UPDATE on the row with a `stock >= qty` predicate, so two concurrent
-        // sales of the last unit can't both pass.
-        for (const item of dto.items) {
+        // UPDATE on the row with a `stock >= pieces` predicate, so two
+        // concurrent sales of the last unit can't both pass. We iterate the
+        // BUILT items, not the DTO, because only they carry stockQuantity
+        // (pieces) — a carton line must move 24 pieces, not 1.
+        for (const item of invoiceItems) {
           const { count } = await tx.product.updateMany({
             where: {
               id: item.productId,
               storeId: sid,
               isActive: true,
-              stock: { gte: item.quantity },
+              stock: { gte: item.stockQuantity },
             },
-            data: { stock: { decrement: item.quantity } },
+            data: { stock: { decrement: item.stockQuantity } },
           });
           if (count === 0) {
             // Diagnose why the conditional failed.
-            const p = productMap.get(item.productId);
             const live = await tx.product.findFirst({
               where: { id: item.productId, storeId: sid },
               select: { stock: true, name: true, isActive: true },
             });
             if (!live || !live.isActive) {
               throw new BadRequestException(
-                `المنتج "${p?.name ?? item.productId}" غير متوفر أو معطّل`,
+                `المنتج "${item.productName}" غير متوفر أو معطّل`,
               );
             }
+            // Always report pieces. A carton line would otherwise read
+            // "الكمية المطلوبة (1) تتجاوز المخزون المتوفر (20)", which makes
+            // no sense to a cashier.
             throw new BadRequestException(
-              `الكمية المطلوبة (${item.quantity}) من "${live.name}" تتجاوز المخزون المتوفر (${live.stock})`,
+              `الكمية المطلوبة (${item.stockQuantity} قطعة) من "${live.name}" تتجاوز المخزون المتوفر (${live.stock} قطعة)`,
             );
           }
         }

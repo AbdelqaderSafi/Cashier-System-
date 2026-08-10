@@ -378,3 +378,165 @@ describe('Carton sales — product update', () => {
     expect(res.status).toBe(400); // forbidNonWhitelisted — not on the DTO
   });
 });
+
+describe('Carton sales — invoice create', () => {
+  let ctx: Ctx;
+
+  beforeAll(async () => {
+    ctx = await bootstrap();
+  });
+
+  afterAll(async () => {
+    await teardown(ctx);
+  });
+
+  async function makeCartonProduct(name: string, stock: number) {
+    return ctx.db.product.create({
+      data: {
+        name,
+        price: new Prisma.Decimal(3),
+        wholesalePrice: new Prisma.Decimal(2),
+        stock,
+        piecesPerCarton: 24,
+        cartonPurchasePrice: new Prisma.Decimal(48),
+        cartonSalePrice: new Prisma.Decimal(60),
+        storeId: ctx.storeId,
+      },
+    });
+  }
+
+  it('sells one carton — deducts 24 pieces and freezes the carton snapshot', async () => {
+    const product = await makeCartonProduct('Carton Sale', 48);
+
+    const res = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        items: [{ productId: product.id, quantity: 1, saleUnit: 'CARTON' }],
+      });
+
+    expect(res.status).toBe(201);
+    expect(Number(res.body.total)).toBe(60);
+
+    const line = res.body.items[0];
+    expect(line.saleUnit).toBe('CARTON');
+    expect(line.stockQuantity).toBe(24);
+    expect(line.quantity).toBe(1);
+    expect(Number(line.price)).toBe(60);
+    expect(Number(line.unitCost)).toBe(48);
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(24); // 48 − 24
+  });
+
+  it('sells a carton and loose pieces of the same product as two lines', async () => {
+    const product = await makeCartonProduct('Mixed Sale', 30);
+
+    const res = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        items: [
+          { productId: product.id, quantity: 1, saleUnit: 'CARTON' },
+          { productId: product.id, quantity: 3, saleUnit: 'UNIT' },
+        ],
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.items).toHaveLength(2);
+    expect(Number(res.body.total)).toBe(69); // 60 + (3 × 3)
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(3); // 30 − 24 − 3
+  });
+
+  it('rejects a carton sale that exceeds stock, reporting pieces not cartons', async () => {
+    const product = await makeCartonProduct('Short Stock', 20);
+
+    const res = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        items: [{ productId: product.id, quantity: 1, saleUnit: 'CARTON' }],
+      });
+
+    expect(res.status).toBe(400);
+    // The message must talk in pieces — "(1) تتجاوز المخزون المتوفر (20)" would
+    // read as nonsense to a cashier.
+    expect(res.body.message).toContain('24');
+    expect(res.body.message).toContain('20');
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(20); // rolled back
+  });
+
+  it('rejects a carton sale of a product with no carton data', async () => {
+    const product = await ctx.db.product.create({
+      data: {
+        name: 'Not A Carton Product',
+        price: new Prisma.Decimal(10),
+        wholesalePrice: new Prisma.Decimal(6),
+        stock: 40,
+        storeId: ctx.storeId,
+      },
+    });
+
+    const res = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        items: [{ productId: product.id, quantity: 1, saleUnit: 'CARTON' }],
+      });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('reports carton profit correctly (carton price × cartons − carton cost × cartons)', async () => {
+    // Isolated store: /reports/daily-profit sums every invoice the store
+    // made today. The sibling tests above already put a successful 60-total
+    // invoice in `ctx`'s store, so reusing it here would let that revenue
+    // leak into this assertion (60 + 120 = 180, exactly the contamination
+    // observed before this fix) — hence a dedicated store, same as every
+    // other describe block in this file.
+    const local = await bootstrap();
+    try {
+      const product = await local.db.product.create({
+        data: {
+          name: 'Profit Check',
+          price: new Prisma.Decimal(3),
+          wholesalePrice: new Prisma.Decimal(2),
+          stock: 48,
+          piecesPerCarton: 24,
+          cartonPurchasePrice: new Prisma.Decimal(48),
+          cartonSalePrice: new Prisma.Decimal(60),
+          storeId: local.storeId,
+        },
+      });
+
+      await request(local.server)
+        .post('/api/invoices')
+        .set('Authorization', `Bearer ${local.token}`)
+        .send({
+          paymentMethod: 'CASH',
+          items: [{ productId: product.id, quantity: 2, saleUnit: 'CARTON' }],
+        })
+        .expect(201);
+
+      const res = await request(local.server)
+        .get('/api/reports/daily-profit')
+        .set('Authorization', `Bearer ${local.token}`);
+
+      expect(res.status).toBe(200);
+      // Only this store's invoices count: revenue 2 × 60, cost 2 × 48.
+      expect(res.body.totalRevenue).toBe(120);
+      expect(res.body.totalCost).toBe(96);
+      expect(res.body.netProfit).toBe(24);
+    } finally {
+      await teardown(local);
+    }
+  });
+});
