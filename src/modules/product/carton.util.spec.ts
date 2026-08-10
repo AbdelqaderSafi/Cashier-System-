@@ -78,8 +78,13 @@ describe('unitCostFromCarton', () => {
   });
 
   it('rounds to 2 decimal places to match the DECIMAL(10,2) column', () => {
-    // 100 / 3 = 33.3333... — must not carry more precision than the column.
-    expect(unitCostFromCarton(100, 3).toFixed(2)).toBe('33.33');
+    // 100 / 3 = 33.3333... — the returned Decimal must carry no more
+    // precision than the column. Asserting on toString() (not toFixed(),
+    // which rounds for display regardless) is what makes this test fail if
+    // the .toDecimalPlaces(2) call is ever dropped.
+    const cost = unitCostFromCarton(100, 3);
+    expect(cost.toString()).toBe('33.33');
+    expect(cost.decimalPlaces()).toBe(2);
   });
 });
 

@@ -48,7 +48,7 @@ export function assertCartonGroupValid(g: CartonGroup): void {
  *
  * Rounded to 2dp to match the DECIMAL(10,2) column — a carton size that does
  * not divide evenly leaves a sub-cent drift on piece sales, which is accepted
- * (see spec §12).
+ * (see spec §4.3).
  */
 export function unitCostFromCarton(
   cartonPurchasePrice: number | Prisma.Decimal,
