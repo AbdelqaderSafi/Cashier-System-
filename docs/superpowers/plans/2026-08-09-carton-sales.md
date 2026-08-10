@@ -2440,9 +2440,11 @@ Expected: PASS — `user.controller.spec.ts`, `user.service.spec.ts`, `carton.ut
 - [ ] **Step 2: Run the full e2e suite**
 
 Run: `DATABASE_URL="postgresql://postgres@localhost:5432/casheer_dev" npm run test:e2e`
-Expected: PASS — all six suites (`cache`, `error-handling`, `ledger-integrity`, `security`, `sync`, `carton-sales`). `ledger-integrity` is the important one: it covers the concurrent-stock and invoice-numbering paths that Tasks 6 and 7 edited.
+Expected: PASS for `cache`, `ledger-integrity`, `security`, `sync`, `carton-sales`. `ledger-integrity` is the important one: it covers the concurrent-stock and invoice-numbering paths that Tasks 6 and 7 edited.
 
-If anything fails, fix it before continuing. Do not proceed to Step 3 with a red suite.
+**Known pre-existing failure — not ours, do not "fix" it here.** 4 tests in `test/error-handling.e2e-spec.ts` fail with 401. Cause: commit `ff39cda` (store suspend/reactivate, landed before this branch) made `src/common/guards/jwt.guard.ts` re-check live store status in the DB on every request, and that spec mints a JWT for a `storeId` it never inserts. Verified: neither `jwt.guard.ts` nor `error-handling.e2e-spec.ts` is touched anywhere on this branch. Report it to the repo owner as separate work; do not weaken the guard or the spec to make it green.
+
+Any failure outside those 4 is ours — fix it before continuing to Step 3.
 
 - [ ] **Step 3: Lint and build**
 
