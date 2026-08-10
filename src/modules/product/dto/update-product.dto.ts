@@ -67,4 +67,38 @@ export class UpdateProductDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @ApiPropertyOptional({
+    example: 24,
+    nullable: true,
+    description:
+      'عدد القطع في الكرتونة — أرسل null في الحقول الثلاثة معاً لإلغاء وضع الكرتونة',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Type(() => Number)
+  piecesPerCarton?: number | null;
+
+  @ApiPropertyOptional({
+    example: 48,
+    nullable: true,
+    description: 'سعر شراء الكرتونة — تغييره يعيد حساب سعر الجملة للقطعة',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  cartonPurchasePrice?: number | null;
+
+  @ApiPropertyOptional({
+    example: 60,
+    nullable: true,
+    description: 'سعر بيع الكرتونة الكاملة',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  cartonSalePrice?: number | null;
 }

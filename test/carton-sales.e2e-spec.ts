@@ -266,3 +266,115 @@ describe('Carton sales — product create', () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe('Carton sales — product update', () => {
+  let ctx: Ctx;
+
+  beforeAll(async () => {
+    ctx = await bootstrap();
+  });
+
+  afterAll(async () => {
+    await teardown(ctx);
+  });
+
+  async function makePlainProduct(name: string, stock = 30) {
+    return ctx.db.product.create({
+      data: {
+        name,
+        price: new Prisma.Decimal(3),
+        wholesalePrice: new Prisma.Decimal(1.5),
+        stock,
+        storeId: ctx.storeId,
+      },
+    });
+  }
+
+  it('converts an existing plain product into a carton product without touching stock', async () => {
+    const product = await makePlainProduct('Convert Me');
+
+    const res = await request(ctx.server)
+      .patch(`/api/products/${product.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ piecesPerCarton: 24, cartonPurchasePrice: 48, cartonSalePrice: 60 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.piecesPerCarton).toBe(24);
+    expect(Number(res.body.wholesalePrice)).toBe(2); // recomputed from 48 / 24
+    expect(res.body.stock).toBe(30); // NOT recomputed — pieces may already be sold
+  });
+
+  it('recomputes wholesalePrice when the carton purchase price changes', async () => {
+    const product = await ctx.db.product.create({
+      data: {
+        name: 'Reprice',
+        price: new Prisma.Decimal(3),
+        wholesalePrice: new Prisma.Decimal(2),
+        stock: 48,
+        piecesPerCarton: 24,
+        cartonPurchasePrice: new Prisma.Decimal(48),
+        cartonSalePrice: new Prisma.Decimal(60),
+        storeId: ctx.storeId,
+      },
+    });
+
+    const res = await request(ctx.server)
+      .patch(`/api/products/${product.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ cartonPurchasePrice: 72 });
+
+    expect(res.status).toBe(200);
+    expect(Number(res.body.wholesalePrice)).toBe(3); // 72 / 24
+  });
+
+  it('clears carton mode when all three fields are set to null', async () => {
+    const product = await ctx.db.product.create({
+      data: {
+        name: 'Clear Carton',
+        price: new Prisma.Decimal(3),
+        wholesalePrice: new Prisma.Decimal(2),
+        stock: 48,
+        piecesPerCarton: 24,
+        cartonPurchasePrice: new Prisma.Decimal(48),
+        cartonSalePrice: new Prisma.Decimal(60),
+        storeId: ctx.storeId,
+      },
+    });
+
+    const res = await request(ctx.server)
+      .patch(`/api/products/${product.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        piecesPerCarton: null,
+        cartonPurchasePrice: null,
+        cartonSalePrice: null,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.piecesPerCarton).toBeNull();
+    expect(res.body.cartonPurchasePrice).toBeNull();
+    expect(res.body.cartonSalePrice).toBeNull();
+  });
+
+  it('rejects an update that would leave a partial carton group', async () => {
+    const product = await makePlainProduct('Partial Update');
+
+    const res = await request(ctx.server)
+      .patch(`/api/products/${product.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ piecesPerCarton: 24 });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects cartonCount on update — stock is never recomputed from cartons', async () => {
+    const product = await makePlainProduct('No Carton Count');
+
+    const res = await request(ctx.server)
+      .patch(`/api/products/${product.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ cartonCount: 5 });
+
+    expect(res.status).toBe(400); // forbidNonWhitelisted — not on the DTO
+  });
+});

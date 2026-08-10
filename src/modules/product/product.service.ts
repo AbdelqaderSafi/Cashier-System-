@@ -207,10 +207,17 @@ export class ProductService {
   async update(sid: string, id: string, dto: UpdateProductDto): Promise<Product> {
     // Read existing row to learn the old barcode — we need to invalidate it
     // explicitly even if `dto.barcode` is undefined (any update can affect
-    // the cached row's stock/price/isActive fields).
+    // the cached row's stock/price/isActive fields). The carton columns come
+    // along because the group must be validated against the MERGED state.
     const existing = await this.db.product.findFirst({
       where: { id, storeId: sid },
-      select: { id: true, barcode: true },
+      select: {
+        id: true,
+        barcode: true,
+        piecesPerCarton: true,
+        cartonPurchasePrice: true,
+        cartonSalePrice: true,
+      },
     });
     if (!existing) throw new NotFoundException('Product not found');
 
@@ -218,18 +225,63 @@ export class ProductService {
       await this.assertBarcodeUnique(sid, dto.barcode, id);
     }
 
-    const updated = await this.db.product.update({
-      where: { id },
-      data: {
-        ...(dto.name !== undefined && { name: dto.name }),
-        ...(dto.barcode !== undefined && { barcode: dto.barcode }),
-        ...(dto.price !== undefined && { price: dto.price }),
-        ...(dto.wholesalePrice !== undefined && { wholesalePrice: dto.wholesalePrice }),
-        ...(dto.stock !== undefined && { stock: dto.stock }),
-        ...(dto.minStock !== undefined && { minStock: dto.minStock }),
-        ...(dto.isActive !== undefined && { isActive: dto.isActive }),
-      },
-    });
+    // A PATCH that touches only one carton field must still leave a complete
+    // (or entirely empty) group behind, so validate what the row will LOOK
+    // like after the merge rather than what the request carries.
+    const merged = {
+      piecesPerCarton:
+        dto.piecesPerCarton !== undefined
+          ? dto.piecesPerCarton
+          : existing.piecesPerCarton,
+      cartonPurchasePrice:
+        dto.cartonPurchasePrice !== undefined
+          ? dto.cartonPurchasePrice
+          : existing.cartonPurchasePrice,
+      cartonSalePrice:
+        dto.cartonSalePrice !== undefined
+          ? dto.cartonSalePrice
+          : existing.cartonSalePrice,
+    };
+    assertCartonGroupValid(merged);
+
+    const data: Prisma.ProductUpdateInput = {
+      ...(dto.name !== undefined && { name: dto.name }),
+      ...(dto.barcode !== undefined && { barcode: dto.barcode }),
+      ...(dto.price !== undefined && { price: dto.price }),
+      ...(dto.stock !== undefined && { stock: dto.stock }),
+      ...(dto.minStock !== undefined && { minStock: dto.minStock }),
+      ...(dto.isActive !== undefined && { isActive: dto.isActive }),
+      ...(dto.piecesPerCarton !== undefined && {
+        piecesPerCarton: dto.piecesPerCarton,
+      }),
+      ...(dto.cartonPurchasePrice !== undefined && {
+        cartonPurchasePrice: dto.cartonPurchasePrice,
+      }),
+      ...(dto.cartonSalePrice !== undefined && {
+        cartonSalePrice: dto.cartonSalePrice,
+      }),
+    };
+
+    // Stock is deliberately NOT recomputed from cartons here — pieces may
+    // already have been sold out of those cartons. wholesalePrice, on the
+    // other hand, is a pure function of the carton figures, so it is
+    // recomputed whenever either input moves.
+    const cartonInputsTouched =
+      dto.piecesPerCarton !== undefined || dto.cartonPurchasePrice !== undefined;
+    if (
+      cartonInputsTouched &&
+      merged.piecesPerCarton != null &&
+      merged.cartonPurchasePrice != null
+    ) {
+      data.wholesalePrice = unitCostFromCarton(
+        merged.cartonPurchasePrice,
+        merged.piecesPerCarton,
+      );
+    } else if (dto.wholesalePrice !== undefined) {
+      data.wholesalePrice = dto.wholesalePrice;
+    }
+
+    const updated = await this.db.product.update({ where: { id }, data });
 
     // Invalidate both the old and (possibly) new barcode entries.
     void this.cacheInvalidator.invalidateProductBarcode(sid, existing.barcode);
