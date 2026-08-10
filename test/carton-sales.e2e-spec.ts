@@ -862,3 +862,109 @@ describe('Carton sales — read responses expose the line unit', () => {
     expect(res.body.invoices[0].items[0].stockQuantity).toBe(24);
   });
 });
+
+describe('Carton sales — offline sync push', () => {
+  let ctx: Ctx;
+
+  beforeAll(async () => {
+    ctx = await bootstrap();
+  });
+
+  afterAll(async () => {
+    await teardown(ctx);
+  });
+
+  async function makeCartonProduct(name: string, stock: number) {
+    return ctx.db.product.create({
+      data: {
+        name,
+        price: new Prisma.Decimal(3),
+        wholesalePrice: new Prisma.Decimal(2),
+        stock,
+        piecesPerCarton: 24,
+        cartonPurchasePrice: new Prisma.Decimal(48),
+        cartonSalePrice: new Prisma.Decimal(60),
+        storeId: ctx.storeId,
+      },
+    });
+  }
+
+  function offlineInvoice(productId: string, itemOverrides: Record<string, unknown>) {
+    return {
+      invoices: [
+        {
+          id: randomUUID(),
+          date: new Date().toISOString(),
+          total: 60,
+          paid: 60,
+          remaining: 0,
+          paymentMethod: 'CASH',
+          items: [
+            {
+              id: randomUUID(),
+              productName: 'Offline Carton',
+              price: 60,
+              quantity: 1,
+              total: 60,
+              unitCost: 48,
+              productId,
+              ...itemOverrides,
+            },
+          ],
+        },
+      ],
+      debts: [],
+      debtPayments: [],
+    };
+  }
+
+  it('recomputes pieces from the product when only saleUnit is sent', async () => {
+    const product = await makeCartonProduct('Offline Recompute', 48);
+
+    const res = await request(ctx.server)
+      .post('/api/sync/push')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send(offlineInvoice(product.id, { saleUnit: 'CARTON' }));
+
+    expect(res.status).toBe(200);
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(24); // 48 − 24, not 48 − 1
+  });
+
+  it('honours an explicit stockQuantity from the device', async () => {
+    const product = await makeCartonProduct('Offline Explicit', 48);
+
+    const res = await request(ctx.server)
+      .post('/api/sync/push')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send(
+        offlineInvoice(product.id, { saleUnit: 'CARTON', stockQuantity: 24 }),
+      );
+
+    expect(res.status).toBe(200);
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(24);
+
+    const line = await ctx.db.invoiceItem.findFirst({
+      where: { productId: product.id },
+    });
+    expect(line!.saleUnit).toBe('CARTON');
+    expect(line!.stockQuantity).toBe(24);
+  });
+
+  it('still deducts pieces for a legacy payload with no saleUnit', async () => {
+    const product = await makeCartonProduct('Offline Legacy', 48);
+
+    const res = await request(ctx.server)
+      .post('/api/sync/push')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send(offlineInvoice(product.id, {}));
+
+    expect(res.status).toBe(200);
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(47); // 48 − 1 piece
+  });
+});
