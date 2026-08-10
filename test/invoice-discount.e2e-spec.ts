@@ -121,3 +121,197 @@ describe('Invoice discount — backward compatibility', () => {
     expect(res.body.totalCost).toBe(36); // 6 × 6
   });
 });
+
+describe('Invoice discount — create and update', () => {
+  let ctx: Ctx;
+
+  beforeAll(async () => {
+    ctx = await bootstrap();
+  });
+
+  afterAll(async () => {
+    await teardown(ctx);
+  });
+
+  it('stores the net total and the discount for a cash sale', async () => {
+    const product = await makeProduct(ctx, 'Cash Discount');
+
+    const res = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        discount: 10,
+        items: [{ productId: product.id, quantity: 6 }],
+      });
+
+    expect(res.status).toBe(201);
+    expect(Number(res.body.total)).toBe(50); // 60 − 10
+    expect(Number(res.body.discount)).toBe(10);
+    expect(Number(res.body.paid)).toBe(50);
+    expect(Number(res.body.remaining)).toBe(0);
+  });
+
+  it('bases the debt on the discounted total', async () => {
+    const product = await makeProduct(ctx, 'Debt Discount');
+    const customer = await ctx.db.customer.create({
+      data: { name: 'Discount Buyer', storeId: ctx.storeId },
+    });
+
+    const res = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'DEBT',
+        customerId: customer.id,
+        discount: 10,
+        items: [{ productId: product.id, quantity: 6 }],
+      });
+
+    expect(res.status).toBe(201);
+    expect(Number(res.body.remaining)).toBe(50);
+
+    const debt = await ctx.db.debt.findFirst({ where: { invoiceId: res.body.id } });
+    expect(Number(debt!.remaining)).toBe(50);
+  });
+
+  it('caps a partial payment at the discounted total, not the gross', async () => {
+    const product = await makeProduct(ctx, 'Partial Discount');
+    const customer = await ctx.db.customer.create({
+      data: { name: 'Partial Buyer', storeId: ctx.storeId },
+    });
+
+    // 55 is below the gross (60) but above the net (50) — it must be refused,
+    // otherwise a "partial" payment would exceed what is actually owed.
+    const tooMuch = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'PARTIAL',
+        customerId: customer.id,
+        discount: 10,
+        paid: 55,
+        items: [{ productId: product.id, quantity: 6 }],
+      });
+    expect(tooMuch.status).toBe(400);
+
+    const ok = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'PARTIAL',
+        customerId: customer.id,
+        discount: 10,
+        paid: 45,
+        items: [{ productId: product.id, quantity: 6 }],
+      });
+    expect(ok.status).toBe(201);
+    expect(Number(ok.body.total)).toBe(50);
+    expect(Number(ok.body.remaining)).toBe(5);
+  });
+
+  it('rejects a discount equal to or above the gross total', async () => {
+    const product = await makeProduct(ctx, 'Over Discount');
+
+    for (const discount of [60, 70]) {
+      const res = await request(ctx.server)
+        .post('/api/invoices')
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({
+          paymentMethod: 'CASH',
+          discount,
+          items: [{ productId: product.id, quantity: 6 }],
+        });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it('rejects a negative discount', async () => {
+    const product = await makeProduct(ctx, 'Negative Discount');
+
+    const res = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        discount: -5,
+        items: [{ productId: product.id, quantity: 6 }],
+      });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('preserves an existing discount when PATCH omits the field', async () => {
+    // Without this, editing any discounted invoice silently reverts its total
+    // to the gross and the customer is charged more than agreed.
+    const product = await makeProduct(ctx, 'Preserve Discount');
+
+    const created = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        discount: 10,
+        items: [{ productId: product.id, quantity: 6 }],
+      });
+    expect(created.status).toBe(201);
+
+    const res = await request(ctx.server)
+      .patch(`/api/invoices/${created.body.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ notes: 'ملاحظة جديدة' });
+
+    expect(res.status).toBe(200);
+    expect(Number(res.body.discount)).toBe(10);
+    expect(Number(res.body.total)).toBe(50);
+  });
+
+  it('recomputes the total when PATCH changes the discount', async () => {
+    const product = await makeProduct(ctx, 'Change Discount');
+
+    const created = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        discount: 10,
+        items: [{ productId: product.id, quantity: 6 }],
+      });
+    expect(created.status).toBe(201);
+
+    const res = await request(ctx.server)
+      .patch(`/api/invoices/${created.body.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ discount: 20 });
+
+    expect(res.status).toBe(200);
+    expect(Number(res.body.discount)).toBe(20);
+    expect(Number(res.body.total)).toBe(40);
+    expect(Number(res.body.paid)).toBe(40);
+  });
+
+  it('re-applies a preserved discount when PATCH replaces the items', async () => {
+    // The gross changes, so the net must be recomputed from the NEW gross
+    // using the SAME preserved discount.
+    const product = await makeProduct(ctx, 'Reapply Discount');
+
+    const created = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        discount: 10,
+        items: [{ productId: product.id, quantity: 6 }],
+      });
+    expect(created.status).toBe(201);
+
+    const res = await request(ctx.server)
+      .patch(`/api/invoices/${created.body.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ items: [{ productId: product.id, quantity: 10 }] });
+
+    expect(res.status).toBe(200);
+    expect(Number(res.body.discount)).toBe(10);
+    expect(Number(res.body.total)).toBe(90); // 100 − 10
+  });
+});

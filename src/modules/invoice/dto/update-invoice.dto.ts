@@ -88,4 +88,15 @@ export class UpdateInvoiceDto {
   @ValidateNested({ each: true })
   @Type(() => UpdateInvoiceItemDto)
   items?: UpdateInvoiceItemDto[];
+
+  @ApiPropertyOptional({
+    example: 20,
+    description:
+      'خصم جديد على الفاتورة كاملة. إذا لم يُرسل يبقى الخصم الحالي كما هو',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  discount?: number;
 }

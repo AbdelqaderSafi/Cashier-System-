@@ -12,6 +12,7 @@ import { InvoiceQueryDto } from './dto/invoice-query.dto';
 import { paginate, paginatedResponse } from '../../common/utils/pagination';
 import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
 import { buildInvoiceItem, stockPiecesOf, type BuiltInvoiceItem } from './invoice-item.util';
+import { applyInvoiceDiscount } from './invoice-discount.util';
 
 export type PaginatedInvoices = {
   data: Invoice[];
@@ -103,10 +104,15 @@ export class InvoiceService {
       ),
     );
 
-    const total = invoiceItems.reduce(
+    // The line sum is the GROSS. What gets stored as `total` is the net after
+    // the invoice discount — invoice_balance_consistent enforces
+    // paid + remaining = total, so paying the net against a gross total would
+    // be rejected by the database.
+    const grossTotal = invoiceItems.reduce(
       (acc, item) => acc.plus(item.total),
       new Prisma.Decimal(0),
     );
+    const { discount, total } = applyInvoiceDiscount(grossTotal, dto.discount);
 
     let paid: Prisma.Decimal;
     let remaining: Prisma.Decimal;
@@ -218,6 +224,7 @@ export class InvoiceService {
           data: {
             number: nextNumber,
             total,
+            discount,
             paid,
             remaining,
             paymentMethod: dto.paymentMethod,
@@ -329,7 +336,10 @@ export class InvoiceService {
 
     // 4. Build new invoice items (if provided)
     let newInvoiceItems: BuiltInvoiceItem[] | null = null;
-    let total: Prisma.Decimal = new Prisma.Decimal(invoice.total);
+    // Start from the stored values. `invoice.total` is already net, so the
+    // gross it came from is total + discount.
+    let discount: Prisma.Decimal = new Prisma.Decimal(invoice.discount);
+    let grossTotal: Prisma.Decimal = new Prisma.Decimal(invoice.total).plus(discount);
 
     if (dto.items !== undefined) {
       if (dto.items.length === 0) {
@@ -363,11 +373,21 @@ export class InvoiceService {
         ),
       );
 
-      total = newInvoiceItems.reduce(
+      grossTotal = newInvoiceItems.reduce(
         (acc, item) => acc.plus(item.total),
         new Prisma.Decimal(0),
       );
     }
+
+    // An omitted discount keeps the stored one, re-applied to whatever the
+    // gross is now — otherwise editing a discounted invoice would silently
+    // revert its total to the gross and overcharge the customer.
+    const applied = applyInvoiceDiscount(
+      grossTotal,
+      dto.discount !== undefined ? dto.discount : discount,
+    );
+    discount = applied.discount;
+    const total = applied.total;
 
     // 5. Calculate paid / remaining
     let paid: Prisma.Decimal;
@@ -477,6 +497,7 @@ export class InvoiceService {
           data: {
             paymentMethod,
             total,
+            discount,
             paid,
             remaining,
             customerId,
@@ -721,6 +742,7 @@ export class InvoiceService {
         id: true,
         number: true,
         total: true,
+        discount: true,
         paid: true,
         remaining: true,
         paymentMethod: true,

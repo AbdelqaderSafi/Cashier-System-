@@ -66,6 +66,19 @@ export class CreateInvoiceDto {
   paid?: number;
 
   @ApiPropertyOptional({
+    example: 10,
+    default: 0,
+    description:
+      'خصم على الفاتورة كاملة (مبلغ مقطوع). المجموع المخزَّن هو الصافي بعد الخصم. ' +
+      'يجب أن يكون أقل من إجمالي البنود',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  discount?: number;
+
+  @ApiPropertyOptional({
     example: 'customer-uuid',
     description: 'معرّف العميل — مطلوب فقط عند DEBT أو PARTIAL. في CASH و ONLINE يُتجاهل (بيع مباشر)',
   })

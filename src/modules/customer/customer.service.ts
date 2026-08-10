@@ -128,6 +128,7 @@ export class CustomerService {
             number: true,
             date: true,
             total: true,
+            discount: true,
             paid: true,
             remaining: true,
             paymentMethod: true,
