@@ -107,9 +107,13 @@ export class SyncService {
   /**
    * Pieces to deduct for one offline line.
    *
-   * Priority: an explicit `stockQuantity` from the device wins (it is what the
-   * device actually reserved against its local copy), then a server-side
-   * recompute from the product's carton size, then the raw quantity.
+   * Priority: a `UNIT` line's `quantity` IS its piece count by definition, so
+   * that is decided first and a client-sent `stockQuantity` is never
+   * consulted for it — honouring it there could only be wrong. For a
+   * `CARTON` line, an explicit `stockQuantity` from the device wins (it is
+   * what the device actually reserved against its local copy), then a
+   * server-side recompute from the product's carton size, then the raw
+   * quantity.
    *
    * A CARTON line on a product with no carton size means the product was
    * converted back to piece-only while the device was offline. The sale
@@ -121,8 +125,12 @@ export class SyncService {
     item: SyncInvoiceItemDto,
     cartonSizeByProductId: Map<string, number | null>,
   ): number {
-    if (item.stockQuantity != null) return item.stockQuantity;
+    // A piece line's quantity IS its piece count, so a client-sent
+    // stockQuantity can only be wrong here — honouring it would let an
+    // outbox bug that computes stockQuantity without checking saleUnit
+    // silently deduct a whole carton for a single-piece sale.
     if (item.saleUnit !== 'CARTON') return item.quantity;
+    if (item.stockQuantity != null) return item.stockQuantity;
 
     const piecesPerCarton = item.productId
       ? cartonSizeByProductId.get(item.productId)

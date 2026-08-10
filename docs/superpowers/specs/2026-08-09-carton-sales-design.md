@@ -189,11 +189,15 @@ price          = dto.price                                   ← من المست
 `SyncInvoiceItemDto` بياخد `saleUnit?` و `stockQuantity?`. كمية الخصم:
 
 ```
-stockQuantity المرسل
-  ?? (saleUnit === CARTON && product.piecesPerCarton
-        ? quantity × product.piecesPerCarton
-        : quantity)
+saleUnit !== CARTON
+  ? quantity
+  : (stockQuantity المرسل
+      ?? (product.piecesPerCarton
+            ? quantity × product.piecesPerCarton
+            : quantity))
 ```
+
+**`stockQuantity` المرسل من الجهاز بينحسب بس لسطر `CARTON`.** سطر `UNIT` كميته هي بالتعريف عدد القطع، فـ`stockQuantity` غلط بالتعريف إلها — لو انحسبت أول شي (قبل التحقق من `saleUnit`) صار أي باغ بالأوف‌لاين بيبعت `stockQuantity` بدون ما يتأكد من الوحدة قادر يخصم كرتونة كاملة عن بيعة قطعة وحدة بصمت.
 
 `piecesPerCarton` بينجاب ضمن استعلام التحقق من ملكية المنتجات الموجود أصلاً (بدون round-trip زيادة).
 
@@ -262,4 +266,4 @@ stockQuantity المرسل
 **تحقّق:**
 13. إرسال `piecesPerCarton` بدون `cartonSalePrice` → `400`.
 14. `cartonCount` بدون `piecesPerCarton` → `400`.
-15. تعديل منتج بإرسال `cartonCount` → الحقل بينتجاهل، المخزون ما بيتغيّر.
+15. تعديل منتج بإرسال `cartonCount` → `400` (`forbidNonWhitelisted`)، المخزون ما بيتغيّر.

@@ -265,6 +265,25 @@ describe('Carton sales — product create', () => {
 
     expect(res.status).toBe(400);
   });
+
+  it('rejects a zero carton sale price', async () => {
+    // A zero carton price yields a zero-total invoice, which violates the
+    // invoice_balance_consistent CHECK (total > 0) and surfaces as an
+    // unmapped 500 at the till. Reject it at entry, like the piece price.
+    const res = await request(ctx.server)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        name: 'Zero Carton Price',
+        price: 3,
+        piecesPerCarton: 24,
+        cartonCount: 1,
+        cartonPurchasePrice: 48,
+        cartonSalePrice: 0,
+      });
+
+    expect(res.status).toBe(400);
+  });
 });
 
 describe('Carton sales — product update', () => {
@@ -1004,5 +1023,23 @@ describe('Carton sales — offline sync push', () => {
     // Falls back to the raw quantity: 1 piece, not a whole carton.
     const after = await ctx.db.product.findUnique({ where: { id: product.id } });
     expect(after!.stock).toBe(47);
+  });
+
+  it('ignores a client stockQuantity on a piece line', async () => {
+    // An outbox bug that computes stockQuantity without checking saleUnit
+    // would otherwise deduct a whole carton for a one-piece sale, silently.
+    const product = await makeCartonProduct('Offline Unit Overreach', 48);
+
+    const res = await request(ctx.server)
+      .post('/api/sync/push')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send(
+        offlineInvoice(product.id, { saleUnit: 'UNIT', stockQuantity: 24 }),
+      );
+
+    expect(res.status).toBe(200);
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(47); // 1 piece, not 24
   });
 });

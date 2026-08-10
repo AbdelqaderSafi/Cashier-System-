@@ -187,6 +187,7 @@ export class ProductService {
             quantity: true,
             price: true,
             total: true,
+            saleUnit: true,
             invoice: {
               select: { id: true, number: true, date: true },
             },

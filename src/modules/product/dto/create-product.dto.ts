@@ -110,7 +110,7 @@ export class CreateProductDto {
   })
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
-  @Min(0)
+  @IsPositive()
   @Type(() => Number)
   cartonSalePrice?: number;
 }
