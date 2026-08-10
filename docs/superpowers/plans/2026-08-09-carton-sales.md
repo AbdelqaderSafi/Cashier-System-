@@ -2446,10 +2446,20 @@ Expected: PASS for `cache`, `ledger-integrity`, `security`, `sync`, `carton-sale
 
 Any failure outside those 4 is ours — fix it before continuing to Step 3.
 
-- [ ] **Step 3: Lint and build**
+- [ ] **Step 3: Lint the changed files and build**
 
-Run: `npm run lint && npm run build`
-Expected: both exit 0.
+**Do not run `npm run lint`.** That script is `eslint ... --fix`, and the repo already has 56 pre-existing lint errors (mostly prettier CRLF/LF disagreements) on files this branch never touches — verified by running eslint against the untouched `user` and `debt` modules. Running it would rewrite files across the whole repo and bury this branch's diff in unrelated churn.
+
+Lint only what this branch changed, without `--fix`:
+
+```bash
+npx eslint $(git diff --name-only main..HEAD -- '*.ts')
+```
+
+Expected: no error that is *new* relative to the rest of the repo. Line-ending (`prettier/prettier` `␍⏎`) complaints are the pre-existing repo-wide condition — leave them. A real error introduced by this branch (unused import, unsafe assertion, undefined variable) must be fixed.
+
+Run: `npm run build`
+Expected: exit 0, clean `nest build` with no TypeScript errors. This one is a hard gate.
 
 - [ ] **Step 4: Confirm the migration is still additive-only**
 
