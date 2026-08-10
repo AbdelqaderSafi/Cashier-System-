@@ -301,6 +301,7 @@ export class SyncService {
                 total: new Prisma.Decimal(invoice.total),
                 paid: new Prisma.Decimal(invoice.paid),
                 remaining: new Prisma.Decimal(invoice.remaining),
+                discount: new Prisma.Decimal(invoice.discount ?? 0),
                 paymentMethod: invoice.paymentMethod,
                 notes: invoice.notes ?? null,
                 customerId: invoice.customerId ?? null,

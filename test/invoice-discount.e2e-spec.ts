@@ -367,3 +367,101 @@ describe('Invoice discount — profit reporting', () => {
     expect(Number(sales.body.summary.totalSales)).toBe(profit.body.totalRevenue);
   });
 });
+
+describe('Invoice discount — offline sync push', () => {
+  let ctx: Ctx;
+
+  beforeAll(async () => {
+    ctx = await bootstrap();
+  });
+
+  afterAll(async () => {
+    await teardown(ctx);
+  });
+
+  it('persists a discount pushed from an offline device and reports it', async () => {
+    const product = await makeProduct(ctx, 'Offline Discount');
+    const invoiceId = randomUUID();
+
+    const res = await request(ctx.server)
+      .post('/api/sync/push')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        invoices: [
+          {
+            id: invoiceId,
+            date: new Date().toISOString(),
+            total: 50, // net, as the device computed it
+            paid: 50,
+            remaining: 0,
+            discount: 10,
+            paymentMethod: 'CASH',
+            items: [
+              {
+                id: randomUUID(),
+                productName: 'Offline Discount',
+                price: 10,
+                quantity: 6,
+                total: 60,
+                unitCost: 6,
+                productId: product.id,
+              },
+            ],
+          },
+        ],
+        debts: [],
+        debtPayments: [],
+      });
+
+    expect(res.status).toBe(200);
+
+    const stored = await ctx.db.invoice.findUnique({ where: { id: invoiceId } });
+    expect(Number(stored!.discount)).toBe(10);
+    expect(Number(stored!.total)).toBe(50);
+
+    // The report must see it too, otherwise the discount is phantom profit.
+    const report = await request(ctx.server)
+      .get('/api/reports/daily-profit')
+      .set('Authorization', `Bearer ${ctx.token}`);
+    expect(report.body.totalRevenue).toBe(50); // 60 line sum − 10 discount
+  });
+
+  it('defaults to zero for a legacy payload with no discount field', async () => {
+    const product = await makeProduct(ctx, 'Offline No Discount');
+    const invoiceId = randomUUID();
+
+    const res = await request(ctx.server)
+      .post('/api/sync/push')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        invoices: [
+          {
+            id: invoiceId,
+            date: new Date().toISOString(),
+            total: 60,
+            paid: 60,
+            remaining: 0,
+            paymentMethod: 'CASH',
+            items: [
+              {
+                id: randomUUID(),
+                productName: 'Offline No Discount',
+                price: 10,
+                quantity: 6,
+                total: 60,
+                unitCost: 6,
+                productId: product.id,
+              },
+            ],
+          },
+        ],
+        debts: [],
+        debtPayments: [],
+      });
+
+    expect(res.status).toBe(200);
+
+    const stored = await ctx.db.invoice.findUnique({ where: { id: invoiceId } });
+    expect(Number(stored!.discount)).toBe(0);
+  });
+});

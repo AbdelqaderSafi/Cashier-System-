@@ -127,6 +127,19 @@ export class SyncInvoiceDto {
   @Type(() => Number)
   remaining!: number;
 
+  @ApiPropertyOptional({
+    example: 10.0,
+    default: 0,
+    description:
+      'خصم الفاتورة (مبلغ مقطوع). المجموع المرسل total هو الصافي بعد الخصم. ' +
+      'ضروري لصحة التقارير — بدونه يُحتسب الخصم ربحاً',
+  })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
+  discount?: number;
+
   @ApiProperty({ enum: PaymentMethod, example: 'PARTIAL', description: 'طريقة الدفع' })
   @IsEnum(PaymentMethod)
   paymentMethod!: PaymentMethod;
