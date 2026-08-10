@@ -131,7 +131,7 @@ export class InvoiceService {
         const paidAmount = new Prisma.Decimal(dto.paid!);
         if (paidAmount.gte(total)) {
           throw new BadRequestException(
-            'المبلغ المدفوع يجب أن يكون أقل من إجمالي الفاتورة عند الدفع الجزئي',
+            `المبلغ المدفوع يجب أن يكون أقل من المبلغ المستحق بعد الخصم (${total.toString()}) عند الدفع الجزئي`,
           );
         }
         if (paidAmount.lte(0)) {
@@ -411,7 +411,7 @@ export class InvoiceService {
             : new Prisma.Decimal(invoice.paid);
         if (paidAmount.gte(total)) {
           throw new BadRequestException(
-            'المبلغ المدفوع يجب أن يكون أقل من إجمالي الفاتورة عند الدفع الجزئي',
+            `المبلغ المدفوع يجب أن يكون أقل من المبلغ المستحق بعد الخصم (${total.toString()}) عند الدفع الجزئي`,
           );
         }
         if (paidAmount.lte(0)) {
@@ -444,6 +444,24 @@ export class InvoiceService {
           `لا يمكن تعديل الفاتورة — المبلغ المتبقي الجديد (${remaining.toString()}) أقل مما تم دفعه فعلاً على الدين (${alreadyPaidOnDebt.toString()})`,
         );
       }
+    }
+
+    // Changing the discount moves the invoice total, and the debt recompute
+    // below cannot reconcile that against payments already recorded: a DEBT
+    // invoice has its `paid` reset to 0 while debts.paid keeps them (the next
+    // payment then trips invoice_balance_consistent and the debt becomes
+    // unpayable), and a PARTIAL invoice subtracts them twice and silently
+    // writes the balance off. Refuse instead, the same way a payment-method
+    // change is refused.
+    if (
+      dto.discount !== undefined &&
+      wasDebt &&
+      invoice.debt &&
+      invoice.debt.payments.length > 0
+    ) {
+      throw new BadRequestException(
+        'لا يمكن تعديل الخصم — الدين عليه دفعات مسجلة. قم بتسوية الدين أولاً.',
+      );
     }
 
     // 7. Execute everything in a single transaction

@@ -465,3 +465,54 @@ describe('Invoice discount — offline sync push', () => {
     expect(Number(stored!.discount)).toBe(0);
   });
 });
+
+describe('Invoice discount — refused once the debt has payments', () => {
+  let ctx: Ctx;
+
+  beforeAll(async () => {
+    ctx = await bootstrap();
+  });
+
+  afterAll(async () => {
+    await teardown(ctx);
+  });
+
+  it('refuses to change the discount once the debt has payments', async () => {
+    const product = await makeProduct(ctx, 'Discount After Payment');
+    const customer = await ctx.db.customer.create({
+      data: { name: 'Paying Buyer', storeId: ctx.storeId },
+    });
+
+    const created = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'DEBT',
+        customerId: customer.id,
+        items: [{ productId: product.id, quantity: 6 }],
+      });
+    expect(created.status).toBe(201);
+
+    const debt = await ctx.db.debt.findFirst({ where: { invoiceId: created.body.id } });
+    const pay = await request(ctx.server)
+      .post(`/api/debts/${debt!.id}/pay`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ amount: 20 });
+    expect(pay.status).toBe(201);
+
+    const res = await request(ctx.server)
+      .patch(`/api/invoices/${created.body.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ discount: 10 });
+
+    expect(res.status).toBe(400);
+
+    // The ledger must be untouched by the refusal.
+    const invoice = await ctx.db.invoice.findUnique({ where: { id: created.body.id } });
+    expect(Number(invoice!.total)).toBe(60);
+    expect(Number(invoice!.discount)).toBe(0);
+    const debtAfter = await ctx.db.debt.findUnique({ where: { id: debt!.id } });
+    expect(Number(debtAfter!.paid)).toBe(20);
+    expect(Number(debtAfter!.remaining)).toBe(40);
+  });
+});

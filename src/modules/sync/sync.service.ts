@@ -287,6 +287,26 @@ export class SyncService {
             const firstNumber =
               store.lastInvoiceNumber - newInvoices.length + 1;
 
+            // Unlike total/paid/remaining, nothing at the DB layer polices
+            // discount (only `@Min(0)` on the DTO), and it feeds
+            // daily-profit directly — a device bug pushing a discount larger
+            // than the invoice's own line sum would make reported revenue
+            // negative with no error and no trace. The sale already
+            // happened offline, so warn rather than reject and lose the
+            // whole batch.
+            for (const invoice of newInvoices) {
+              const lineSum = invoice.items.reduce(
+                (acc, item) => acc.plus(new Prisma.Decimal(item.total)),
+                new Prisma.Decimal(0),
+              );
+              const discount = new Prisma.Decimal(invoice.discount ?? 0);
+              if (discount.gt(lineSum)) {
+                this.logger.warn(
+                  `[sync/push] Invoice ${invoice.id} discount (${discount.toString()}) exceeds its line sum (${lineSum.toString()}).`,
+                );
+              }
+            }
+
             // No `skipDuplicates` — with the advisory lock + scoped pre-fetch
             // above, every id in `newInvoices` is guaranteed not to exist for
             // this store. If a duplicate somehow reached this INSERT it would
