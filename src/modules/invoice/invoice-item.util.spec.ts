@@ -81,6 +81,27 @@ describe('buildInvoiceItem — carton sales', () => {
       ),
     ).toThrow(BadRequestException);
   });
+
+  it('rejects a carton sale when only piecesPerCarton is missing', () => {
+    // Without this case, deleting the `piecesPerCarton == null` clause from the
+    // guard would go unnoticed — and `quantity * null` writes NaN toward the
+    // stock ledger rather than failing loudly.
+    expect(() =>
+      buildInvoiceItem({ ...cartonProduct, piecesPerCarton: null }, 1, 'CARTON'),
+    ).toThrow(BadRequestException);
+  });
+
+  it('rejects a carton sale when only cartonPurchasePrice is missing', () => {
+    // Without this case, deleting the `cartonPurchasePrice == null` clause
+    // would surface as a raw Decimal error (500) instead of an Arabic 400.
+    expect(() =>
+      buildInvoiceItem(
+        { ...cartonProduct, cartonPurchasePrice: null },
+        1,
+        'CARTON',
+      ),
+    ).toThrow(BadRequestException);
+  });
 });
 
 describe('stockPiecesOf', () => {
