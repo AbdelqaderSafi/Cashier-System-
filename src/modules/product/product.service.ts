@@ -3,6 +3,7 @@ import {
   Injectable,
   ConflictException,
   NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { Cache } from 'cache-manager';
@@ -14,6 +15,12 @@ import { ProductQueryDto } from './dto/product-query.dto';
 import { paginate, paginatedResponse } from '../../common/utils/pagination';
 import { CacheKeys, CacheTtl } from '../../common/cache/cache-keys';
 import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
+import {
+  assertCartonGroupValid,
+  isCartonGroupComplete,
+  openingStockFromCartons,
+  unitCostFromCarton,
+} from './carton.util';
 
 export type PaginatedProducts = {
   data: Product[];
@@ -56,14 +63,41 @@ export class ProductService {
       await this.assertBarcodeUnique(sid, dto.barcode);
     }
 
+    assertCartonGroupValid(dto);
+
+    if (dto.cartonCount != null && dto.piecesPerCarton == null) {
+      throw new BadRequestException(
+        'عدد الكراتين يتطلب تحديد عدد القطع في الكرتونة',
+      );
+    }
+
+    // In carton mode the server owns both derived columns. `stock` from the
+    // request means loose pieces held outside a full carton, so it adds on
+    // top; `wholesalePrice` is always recomputed so per-piece profit can never
+    // drift away from the carton figures the owner actually entered.
+    const isCarton = isCartonGroupComplete(dto);
+    const stock = isCarton
+      ? openingStockFromCartons(
+          dto.cartonCount ?? 0,
+          dto.piecesPerCarton!,
+          dto.stock ?? 0,
+        )
+      : dto.stock ?? 0;
+    const wholesalePrice = isCarton
+      ? unitCostFromCarton(dto.cartonPurchasePrice!, dto.piecesPerCarton!)
+      : dto.wholesalePrice ?? 0;
+
     const created = await this.db.product.create({
       data: {
         name: dto.name,
         barcode: dto.barcode ?? null,
         price: dto.price,
-        wholesalePrice: dto.wholesalePrice ?? 0,
-        stock: dto.stock ?? 0,
+        wholesalePrice,
+        stock,
         minStock: dto.minStock ?? 5,
+        piecesPerCarton: dto.piecesPerCarton ?? null,
+        cartonPurchasePrice: dto.cartonPurchasePrice ?? null,
+        cartonSalePrice: dto.cartonSalePrice ?? null,
         storeId: sid,
       },
     });

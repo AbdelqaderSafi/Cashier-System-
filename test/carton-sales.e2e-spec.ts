@@ -172,3 +172,97 @@ describe('Carton sales — backward compatibility', () => {
     expect(after!.stock).toBe(40); // 37 + 3, from the quantity fallback
   });
 });
+
+describe('Carton sales — product create', () => {
+  let ctx: Ctx;
+
+  beforeAll(async () => {
+    ctx = await bootstrap();
+  });
+
+  afterAll(async () => {
+    await teardown(ctx);
+  });
+
+  it('derives stock from cartons plus loose pieces, and unit cost from the carton price', async () => {
+    const res = await request(ctx.server)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        name: 'Pepsi 330ml',
+        price: 3,
+        stock: 5, // loose pieces
+        piecesPerCarton: 24,
+        cartonCount: 2,
+        cartonPurchasePrice: 48,
+        cartonSalePrice: 60,
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.stock).toBe(53); // 2 × 24 + 5
+    expect(Number(res.body.wholesalePrice)).toBe(2); // 48 / 24
+    expect(Number(res.body.price)).toBe(3); // untouched
+    expect(res.body.piecesPerCarton).toBe(24);
+    expect(Number(res.body.cartonPurchasePrice)).toBe(48);
+    expect(Number(res.body.cartonSalePrice)).toBe(60);
+  });
+
+  it('ignores a client-sent wholesalePrice in carton mode', async () => {
+    const res = await request(ctx.server)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        name: 'Ignored Wholesale',
+        price: 3,
+        wholesalePrice: 999,
+        piecesPerCarton: 24,
+        cartonCount: 1,
+        cartonPurchasePrice: 48,
+        cartonSalePrice: 60,
+      });
+
+    expect(res.status).toBe(201);
+    expect(Number(res.body.wholesalePrice)).toBe(2);
+    expect(res.body.stock).toBe(24);
+  });
+
+  it('defaults stock to the carton pieces when no loose pieces are sent', async () => {
+    const res = await request(ctx.server)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        name: 'No Loose Pieces',
+        price: 3,
+        piecesPerCarton: 24,
+        cartonCount: 2,
+        cartonPurchasePrice: 48,
+        cartonSalePrice: 60,
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.stock).toBe(48);
+  });
+
+  it('rejects a partial carton group', async () => {
+    const res = await request(ctx.server)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        name: 'Partial Carton',
+        price: 3,
+        piecesPerCarton: 24,
+        cartonPurchasePrice: 48,
+      });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects cartonCount without piecesPerCarton', async () => {
+    const res = await request(ctx.server)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ name: 'Orphan Count', price: 3, cartonCount: 2 });
+
+    expect(res.status).toBe(400);
+  });
+});
