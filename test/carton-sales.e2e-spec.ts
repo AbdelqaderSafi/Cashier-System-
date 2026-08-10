@@ -933,25 +933,34 @@ describe('Carton sales — offline sync push', () => {
   });
 
   it('honours an explicit stockQuantity from the device', async () => {
+    // The explicit value (30) deliberately disagrees with what a server-side
+    // recompute would produce (1 × 24 = 24, from the product's *current*
+    // piecesPerCarton). The device reserved 30 pieces because the carton
+    // held 30 pieces when this sale happened offline; the product's carton
+    // size has since been changed to 24 on the server. The client's value
+    // must win — it is what the device actually reserved against its own
+    // local copy, not what the product looks like now. If the two numbers
+    // agreed here, deleting the explicit-stockQuantity branch from
+    // syncStockPieces would leave this test green for the wrong reason.
     const product = await makeCartonProduct('Offline Explicit', 48);
 
     const res = await request(ctx.server)
       .post('/api/sync/push')
       .set('Authorization', `Bearer ${ctx.token}`)
       .send(
-        offlineInvoice(product.id, { saleUnit: 'CARTON', stockQuantity: 24 }),
+        offlineInvoice(product.id, { saleUnit: 'CARTON', stockQuantity: 30 }),
       );
 
     expect(res.status).toBe(200);
 
     const after = await ctx.db.product.findUnique({ where: { id: product.id } });
-    expect(after!.stock).toBe(24);
+    expect(after!.stock).toBe(18); // 48 − 30 (the explicit value), not 48 − 24
 
     const line = await ctx.db.invoiceItem.findFirst({
       where: { productId: product.id },
     });
     expect(line!.saleUnit).toBe('CARTON');
-    expect(line!.stockQuantity).toBe(24);
+    expect(line!.stockQuantity).toBe(30);
   });
 
   it('still deducts pieces for a legacy payload with no saleUnit', async () => {
@@ -966,5 +975,34 @@ describe('Carton sales — offline sync push', () => {
 
     const after = await ctx.db.product.findUnique({ where: { id: product.id } });
     expect(after!.stock).toBe(47); // 48 − 1 piece
+  });
+
+  it('accepts a carton line on a non-carton product instead of destroying the batch', async () => {
+    // The device sold this as a carton while offline; the product has since
+    // lost its carton data. The sale physically happened, so the server must
+    // record it and deduct pieces rather than reject — rejecting would throw
+    // away every queued sale in the batch. It logs a stock-discrepancy
+    // warning instead.
+    const product = await ctx.db.product.create({
+      data: {
+        name: 'Offline No Carton Data',
+        price: new Prisma.Decimal(3),
+        wholesalePrice: new Prisma.Decimal(2),
+        stock: 48,
+        storeId: ctx.storeId,
+      },
+    });
+
+    const res = await request(ctx.server)
+      .post('/api/sync/push')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send(offlineInvoice(product.id, { saleUnit: 'CARTON' }));
+
+    expect(res.status).toBe(200);
+    expect(res.body.report.invoices.inserted).toBe(1);
+
+    // Falls back to the raw quantity: 1 piece, not a whole carton.
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(47);
   });
 });
