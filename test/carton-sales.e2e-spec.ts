@@ -586,3 +586,126 @@ describe('Carton sales — invoice create', () => {
     }
   });
 });
+
+describe('Carton sales — invoice update and delete', () => {
+  let ctx: Ctx;
+
+  beforeAll(async () => {
+    ctx = await bootstrap();
+  });
+
+  afterAll(async () => {
+    await teardown(ctx);
+  });
+
+  async function makeCartonProduct(name: string, stock: number) {
+    return ctx.db.product.create({
+      data: {
+        name,
+        price: new Prisma.Decimal(3),
+        wholesalePrice: new Prisma.Decimal(2),
+        stock,
+        piecesPerCarton: 24,
+        cartonPurchasePrice: new Prisma.Decimal(48),
+        cartonSalePrice: new Prisma.Decimal(60),
+        storeId: ctx.storeId,
+      },
+    });
+  }
+
+  async function sellCartons(productId: string, cartons: number) {
+    const res = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        items: [{ productId, quantity: cartons, saleUnit: 'CARTON' }],
+      });
+    expect(res.status).toBe(201);
+    return res.body.id as string;
+  }
+
+  it('restores full carton pieces when the invoice is deleted', async () => {
+    const product = await makeCartonProduct('Delete Restore', 48);
+    const invoiceId = await sellCartons(product.id, 1);
+
+    const mid = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(mid!.stock).toBe(24);
+
+    const res = await request(ctx.server)
+      .delete(`/api/invoices/${invoiceId}`)
+      .set('Authorization', `Bearer ${ctx.token}`);
+    expect([200, 204]).toContain(res.status);
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(48); // 24 restored, not 1
+  });
+
+  it('restores carton pieces and deducts the new line when items are replaced', async () => {
+    const product = await makeCartonProduct('Update Swap', 48);
+    const invoiceId = await sellCartons(product.id, 1); // stock 24
+
+    const res = await request(ctx.server)
+      .patch(`/api/invoices/${invoiceId}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ items: [{ productId: product.id, quantity: 5, saleUnit: 'UNIT' }] });
+
+    expect(res.status).toBe(200);
+    expect(Number(res.body.total)).toBe(15); // 5 × 3
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(43); // 24 + 24 restored − 5 deducted
+  });
+
+  it('upgrades a piece line to a carton line on update', async () => {
+    const product = await makeCartonProduct('Upgrade To Carton', 48);
+
+    const created = await request(ctx.server)
+      .post('/api/invoices')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        paymentMethod: 'CASH',
+        items: [{ productId: product.id, quantity: 2 }],
+      });
+    expect(created.status).toBe(201); // stock 46
+
+    const res = await request(ctx.server)
+      .patch(`/api/invoices/${created.body.id}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({ items: [{ productId: product.id, quantity: 1, saleUnit: 'CARTON' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.items[0].saleUnit).toBe('CARTON');
+    expect(res.body.items[0].stockQuantity).toBe(24);
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    expect(after!.stock).toBe(24); // 46 + 2 restored − 24 deducted
+  });
+
+  it('updates an invoice to a carton line plus a loose-piece line of the same product', async () => {
+    // Guards InvoiceService.update's productIds dedup: two dto.items entries
+    // for the SAME product must not false-fire the "products not found" 404
+    // that `products.length !== productIds.length` would throw without the
+    // dedupe (products comes back deduped by the DB; productIds did not).
+    const product = await makeCartonProduct('Update Dedup', 60);
+    const invoiceId = await sellCartons(product.id, 1); // stock 60 − 24 = 36
+
+    const res = await request(ctx.server)
+      .patch(`/api/invoices/${invoiceId}`)
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .send({
+        items: [
+          { productId: product.id, quantity: 1, saleUnit: 'CARTON' },
+          { productId: product.id, quantity: 3, saleUnit: 'UNIT' },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(2);
+    expect(Number(res.body.total)).toBe(69); // 60 + (3 × 3)
+
+    const after = await ctx.db.product.findUnique({ where: { id: product.id } });
+    // 60 (start) + 24 (restore old carton line) − 24 (new carton line) − 3 (new unit line)
+    expect(after!.stock).toBe(33);
+  });
+});

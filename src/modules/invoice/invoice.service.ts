@@ -11,7 +11,7 @@ import { UpdateInvoiceDto } from './dto/update-invoice.dto';
 import { InvoiceQueryDto } from './dto/invoice-query.dto';
 import { paginate, paginatedResponse } from '../../common/utils/pagination';
 import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
-import { buildInvoiceItem } from './invoice-item.util';
+import { buildInvoiceItem, stockPiecesOf, type BuiltInvoiceItem } from './invoice-item.util';
 
 export type PaginatedInvoices = {
   data: Invoice[];
@@ -278,7 +278,14 @@ export class InvoiceService {
     const invoice = await this.db.invoice.findFirst({
       where: { id, storeId: sid },
       include: {
-        items: { select: { id: true, productId: true, quantity: true } },
+        items: {
+          select: {
+            id: true,
+            productId: true,
+            quantity: true,
+            stockQuantity: true,
+          },
+        },
         debt: {
           select: {
             id: true,
@@ -321,17 +328,7 @@ export class InvoiceService {
     }
 
     // 4. Build new invoice items (if provided)
-    type NewItem = {
-      productName: string;
-      barcode: string | null;
-      price: Prisma.Decimal;
-      unitCost: Prisma.Decimal;
-      quantity: number;
-      total: Prisma.Decimal;
-      productId: string;
-    };
-
-    let newInvoiceItems: NewItem[] | null = null;
+    let newInvoiceItems: BuiltInvoiceItem[] | null = null;
     let total: Prisma.Decimal = new Prisma.Decimal(invoice.total);
 
     if (dto.items !== undefined) {
@@ -339,7 +336,11 @@ export class InvoiceService {
         throw new BadRequestException('الفاتورة يجب أن تحتوي على بند واحد على الأقل');
       }
 
-      const productIds = dto.items.map((i) => i.productId);
+      // Dedupe before the existence check — a carton line and a loose-piece
+      // line of the SAME product are two separate dto.items entries, and
+      // `products` comes back deduped by the DB. Without this, a valid
+      // two-line update 404s as "product not found". Mirrors create().
+      const productIds = [...new Set(dto.items.map((i) => i.productId))];
       const products = await this.db.product.findMany({
         where: { id: { in: productIds }, storeId: sid, isActive: true },
       });
@@ -354,21 +355,13 @@ export class InvoiceService {
 
       const productMap = new Map(products.map((p) => [p.id, p]));
 
-      newInvoiceItems = dto.items.map((item) => {
-        const product = productMap.get(item.productId)!;
-        const price = new Prisma.Decimal(product.price);
-        const unitCost = new Prisma.Decimal(product.wholesalePrice);
-        const itemTotal = price.times(item.quantity);
-        return {
-          productName: product.name,
-          barcode: product.barcode ?? null,
-          price,
-          unitCost,
-          quantity: item.quantity,
-          total: itemTotal,
-          productId: product.id,
-        };
-      });
+      newInvoiceItems = dto.items.map((item) =>
+        buildInvoiceItem(
+          productMap.get(item.productId)!,
+          item.quantity,
+          item.saleUnit,
+        ),
+      );
 
       total = newInvoiceItems.reduce(
         (acc, item) => acc.plus(item.total),
@@ -437,31 +430,29 @@ export class InvoiceService {
     const result = await this.db.$transaction(
       async (tx) => {
         if (newInvoiceItems !== null) {
-          // a. Restore stock for all OLD items in one atomic UPDATE.
           // a. Restore stock for all OLD items. updateMany per item — each
-          //    one is a single atomic UPDATE.
+          //    one is a single atomic UPDATE. stockPiecesOf() covers lines
+          //    written before carton support, whose stockQuantity is NULL.
           for (const oldItem of invoice.items) {
             if (oldItem.productId) {
               await tx.product.updateMany({
                 where: { id: oldItem.productId, storeId: sid },
-                data: { stock: { increment: oldItem.quantity } },
+                data: { stock: { increment: stockPiecesOf(oldItem) } },
               });
             }
           }
 
-          // b. Atomic conditional deduction for the NEW items. If any line
-          //    can't be deducted, the failed-row count diverges from the
-          //    expected count and we diagnose the cause for a friendly error.
-          // b. Atomic per-item conditional deduction for the NEW items.
+          // b. Atomic per-item conditional deduction for the NEW items, in
+          //    pieces.
           for (const newItem of newInvoiceItems) {
             const { count } = await tx.product.updateMany({
               where: {
                 id: newItem.productId,
                 storeId: sid,
                 isActive: true,
-                stock: { gte: newItem.quantity },
+                stock: { gte: newItem.stockQuantity },
               },
-              data: { stock: { decrement: newItem.quantity } },
+              data: { stock: { decrement: newItem.stockQuantity } },
             });
             if (count === 0) {
               const live = await tx.product.findFirst({
@@ -474,7 +465,7 @@ export class InvoiceService {
                 );
               }
               throw new BadRequestException(
-                `الكمية المطلوبة (${newItem.quantity}) من "${newItem.productName}" تتجاوز المخزون المتوفر (${live.stock})`,
+                `الكمية المطلوبة (${newItem.stockQuantity} قطعة) من "${newItem.productName}" تتجاوز المخزون المتوفر (${live.stock} قطعة)`,
               );
             }
           }
@@ -777,7 +768,7 @@ export class InvoiceService {
     const invoice = await this.db.invoice.findFirst({
       where: { id, storeId: sid },
       include: {
-        items: { select: { productId: true, quantity: true } },
+        items: { select: { productId: true, quantity: true, stockQuantity: true } },
         debt: { select: { id: true, isPaid: true, payments: { select: { id: true } } } },
       },
     });
@@ -796,7 +787,7 @@ export class InvoiceService {
           if (item.productId) {
             await tx.product.updateMany({
               where: { id: item.productId, storeId: sid },
-              data: { stock: { increment: item.quantity } },
+              data: { stock: { increment: stockPiecesOf(item) } },
             });
           }
         }
