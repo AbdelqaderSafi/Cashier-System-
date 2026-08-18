@@ -13,6 +13,8 @@ import { paginate, paginatedResponse } from '../../common/utils/pagination';
 import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
 import { buildInvoiceItem, stockPiecesOf, type BuiltInvoiceItem } from './invoice-item.util';
 import { applyInvoiceDiscount } from './invoice-discount.util';
+import { dayRangeInZone } from '../../common/utils/day-range.util';
+import { env } from '../../common/config/env';
 
 export type PaginatedInvoices = {
   data: Invoice[];
@@ -621,11 +623,12 @@ export class InvoiceService {
 
     if (query.dateFrom || query.dateTo) {
       where.date = {};
-      if (query.dateFrom) where.date.gte = new Date(query.dateFrom);
+      if (query.dateFrom) {
+        where.date.gte = dayRangeInZone(query.dateFrom, env.STORE_TIMEZONE).start;
+      }
       if (query.dateTo) {
-        const end = new Date(query.dateTo);
-        end.setHours(23, 59, 59, 999);
-        where.date.lte = end;
+        // `end` is the next local midnight, so this stays exclusive.
+        where.date.lt = dayRangeInZone(query.dateTo, env.STORE_TIMEZONE).end;
       }
     }
 
@@ -744,17 +747,18 @@ export class InvoiceService {
   // ─── Daily Sales Summary ─────────────────────────────────────────────────────
 
   async getDailySales(sid: string, dateStr?: string) {
-
-    const target = dateStr ? new Date(dateStr) : new Date();
-    const startOfDay = new Date(target);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(target);
-    endOfDay.setHours(23, 59, 59, 999);
+    // Day boundaries follow the shop's clock, not the container's. The
+    // container runs UTC, so slicing on its clock hid every sale rung up
+    // between local midnight and the zone offset.
+    const { start: startOfDay, end: endOfDay, dayIso } = dayRangeInZone(
+      dateStr,
+      env.STORE_TIMEZONE,
+    );
 
     const invoices = await this.db.invoice.findMany({
       where: {
         storeId: sid,
-        date: { gte: startOfDay, lte: endOfDay },
+        date: { gte: startOfDay, lt: endOfDay },
       },
       select: {
         id: true,
@@ -792,7 +796,7 @@ export class InvoiceService {
     );
 
     return {
-      date: startOfDay.toISOString().split('T')[0],
+      date: dayIso,
       summary: {
         invoiceCount: invoices.length,
         totalSales: totalSales.toString(),

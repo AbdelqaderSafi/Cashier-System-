@@ -10,6 +10,8 @@ import { PayDebtDto } from './dto/pay-debt.dto';
 import { DebtQueryDto } from './dto/debt-query.dto';
 import { paginate, paginatedResponse } from '../../common/utils/pagination';
 import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
+import { dayRangeInZone } from '../../common/utils/day-range.util';
+import { env } from '../../common/config/env';
 
 export type PaginatedDebts = {
   data: Debt[];
@@ -45,11 +47,12 @@ export class DebtService {
 
     if (query.dateFrom || query.dateTo) {
       where.date = {};
-      if (query.dateFrom) where.date.gte = new Date(query.dateFrom);
+      if (query.dateFrom) {
+        where.date.gte = dayRangeInZone(query.dateFrom, env.STORE_TIMEZONE).start;
+      }
       if (query.dateTo) {
-        const end = new Date(query.dateTo);
-        end.setHours(23, 59, 59, 999);
-        where.date.lte = end;
+        // `end` is the next local midnight, so this stays exclusive.
+        where.date.lt = dayRangeInZone(query.dateTo, env.STORE_TIMEZONE).end;
       }
     }
 

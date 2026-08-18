@@ -4,6 +4,8 @@ import type { Cache } from 'cache-manager';
 import { DatabaseService } from '../database/database.service';
 import { CacheKeys, CacheTtl } from '../../common/cache/cache-keys';
 import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
+import { dayRangeInZone } from '../../common/utils/day-range.util';
+import { env } from '../../common/config/env';
 
 export interface DailyProfitResult {
   date: string;
@@ -30,21 +32,24 @@ export class ReportsService {
    * Both revenue and cost are read from InvoiceItem so historical records
    * are never affected by future price/cost changes on the Product row.
    */
-  async getDailyProfit(sid: string, dateStr?: string): Promise<DailyProfitResult> {
-    // Resolve target date (defaults to today in UTC)
-    const target = dateStr ? new Date(dateStr) : new Date();
-    const dayStart = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth(), target.getUTCDate(), 0, 0, 0));
-    const dayEnd = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth(), target.getUTCDate(), 23, 59, 59, 999));
+  async getDailyProfit(
+    sid: string,
+    dateStr?: string,
+  ): Promise<DailyProfitResult> {
+    // Resolve the target day on the shop's clock. Reading it off UTC shifts
+    // the window by the zone offset, which files every sale rung up between
+    // local midnight and that offset under the previous day.
+    const {
+      start: dayStart,
+      end: dayEnd,
+      dayIso,
+    } = dayRangeInZone(dateStr, env.STORE_TIMEZONE);
 
     // Only cache *past* days — they're immutable. Today is still changing, so
-    // we always re-fetch to avoid stale numbers. Compare day-start UTC vs.
-    // today's day-start UTC.
-    const now = new Date();
-    const todayStart = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-    );
+    // we always re-fetch to avoid stale numbers. "Past" is judged against the
+    // shop's current day, not the container's.
+    const todayStart = dayRangeInZone(undefined, env.STORE_TIMEZONE).start;
     const isPastDay = dayStart.getTime() < todayStart.getTime();
-    const dayIso = dayStart.toISOString().slice(0, 10);
     const cacheKey = CacheKeys.dailyProfit(sid, dayIso);
 
     if (isPastDay) {
@@ -57,11 +62,11 @@ export class ReportsService {
       where: {
         invoice: {
           storeId: sid,
-          date: { gte: dayStart, lte: dayEnd },
+          date: { gte: dayStart, lt: dayEnd },
         },
       },
       _sum: {
-        total: true,    // price × quantity already stored
+        total: true, // price × quantity already stored
         quantity: true, // kept for possible future use
       },
     });
@@ -74,7 +79,8 @@ export class ReportsService {
       FROM   invoice_items ii
       JOIN   invoices       i  ON i.id = ii."invoiceId"
       WHERE  i."storeId" = ${sid}
-        AND  i.date BETWEEN ${dayStart} AND ${dayEnd}
+        AND  i.date >= ${dayStart}
+        AND  i.date <  ${dayEnd}
     `;
 
     // Invoice-level discounts live on the invoice, not on its lines, so the
@@ -84,7 +90,8 @@ export class ReportsService {
       SELECT COALESCE(SUM(i."discount"), 0)::text AS total_discount
       FROM   invoices i
       WHERE  i."storeId" = ${sid}
-        AND  i.date BETWEEN ${dayStart} AND ${dayEnd}
+        AND  i.date >= ${dayStart}
+        AND  i.date <  ${dayEnd}
     `;
 
     const grossRevenue = Number(result._sum.total ?? 0);
