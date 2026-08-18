@@ -215,3 +215,89 @@ describe('Report day boundaries follow the shop clock, not UTC', () => {
     });
   });
 });
+
+/**
+ * The exact scenario from the bug report: an admin opens the dashboard at
+ * 00:27 local time and every date-scoped tile reads zero, while the debt
+ * total — not date-scoped — still shows data.
+ *
+ * The clock is frozen rather than a date passed explicitly, because the
+ * complaint was about the *default* day the server picks when the dashboard
+ * asks for "today" without naming it.
+ *
+ * Only Date is faked; every timer API is left real so Prisma's connection
+ * handling and supertest's HTTP round-trip still work.
+ */
+describe('The reported scenario: dashboard opened at 00:27 local, no date sent', () => {
+  // 2026-08-18 00:27 in Asia/Hebron (UTC+3) — still 2026-08-17 in UTC.
+  const OPENED_AT = new Date('2026-08-17T21:27:00.000Z');
+  // A sale rung up 17 minutes earlier, on the same local day.
+  const SOLD_AT = new Date('2026-08-17T21:10:00.000Z');
+
+  let ctx: Ctx;
+
+  beforeAll(async () => {
+    // Bootstrap on the real clock — faking Date across Prisma's connect hangs it.
+    ctx = await bootstrap();
+    await sale(ctx, 1, SOLD_AT, 250, 150);
+  });
+
+  afterAll(async () => {
+    await teardown(ctx);
+  });
+
+  beforeEach(() => {
+    jest.useFakeTimers({
+      doNotFake: [
+        'setTimeout',
+        'setInterval',
+        'setImmediate',
+        'clearTimeout',
+        'clearInterval',
+        'clearImmediate',
+        'nextTick',
+        'queueMicrotask',
+        'performance',
+        'hrtime',
+      ],
+      now: OPENED_AT,
+    });
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('reports the local day, not the UTC day the server is still on', async () => {
+    const res = await request(ctx.server)
+      .get('/api/invoices/daily-sales')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .expect(200);
+
+    expect(res.body.date).toBe('2026-08-18');
+  });
+
+  it('shows the sale instead of an empty dashboard', async () => {
+    const res = await request(ctx.server)
+      .get('/api/invoices/daily-sales')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .expect(200);
+
+    expect(res.body.summary.invoiceCount).toBe(1);
+    expect(Number(res.body.summary.totalSales)).toBe(250);
+  });
+
+  it('reports profit for the local day rather than zero', async () => {
+    const res = await request(ctx.server)
+      .get('/api/reports/daily-profit')
+      .set('Authorization', `Bearer ${ctx.token}`)
+      .expect(200);
+
+    expect(res.body).toMatchObject({
+      date: '2026-08-18',
+      totalRevenue: 250,
+      totalCost: 150,
+      netProfit: 100,
+    });
+  });
+});
