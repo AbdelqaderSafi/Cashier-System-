@@ -22,7 +22,8 @@ export interface DayRange {
 }
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})/;
+/** A bare calendar date, as opposed to a full ISO instant. */
+const CALENDAR_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Formatters are expensive to build and these are hot paths, so memoise. */
 const formatters = new Map<string, Intl.DateTimeFormat>();
@@ -130,15 +131,19 @@ export function dayRangeInZone(
   let month: number;
   let day: number;
 
-  const parsed = dateStr ? DATE_ONLY.exec(dateStr) : null;
-  if (parsed) {
-    year = Number(parsed[1]);
-    month = Number(parsed[2]);
-    day = Number(parsed[3]);
+  const supplied = dateStr?.trim();
+
+  if (supplied && CALENDAR_DATE.test(supplied)) {
+    // A bare calendar date already names the day — nothing to convert.
+    [year, month, day] = supplied.split('-').map(Number);
   } else {
-    // No date given (or an unparseable one): use today *in the shop's zone*,
-    // which is not necessarily the server's today.
-    const [y, m, d] = localDayIso(new Date(), timeZone).split('-');
+    // Either an instant or nothing. IsDateString accepts full ISO, so a
+    // caller sending new Date().toISOString() arrives here as a UTC instant;
+    // taking its first ten characters would reinstate the bug this fixes.
+    // Both cases resolve to whichever local day the moment belongs to.
+    const parsed = supplied ? new Date(supplied) : new Date();
+    const instant = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+    const [y, m, d] = localDayIso(instant, timeZone).split('-');
     year = Number(y);
     month = Number(m);
     day = Number(d);

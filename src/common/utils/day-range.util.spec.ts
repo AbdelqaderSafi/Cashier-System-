@@ -159,3 +159,92 @@ describe('dayRangeInZone — whole-year invariants (Asia/Hebron)', () => {
     }
   });
 });
+
+/**
+ * The `date` query param is validated with @IsDateString(), which accepts a
+ * full ISO instant as readily as a plain calendar date. A frontend sending
+ * `new Date().toISOString()` therefore reaches us as a UTC instant, and
+ * slicing its first ten characters would reintroduce the very bug this fixes:
+ * at 00:27 local the instant still reads as the previous UTC date.
+ *
+ * A plain date is a calendar date and stays literal. Anything carrying a time
+ * is an instant, and the day it belongs to is decided in the shop's zone.
+ */
+describe('dayRangeInZone — instants vs. calendar dates', () => {
+  const ZONE = 'Asia/Hebron'; // UTC+3 in August
+
+  it('treats a plain YYYY-MM-DD as a literal calendar date', () => {
+    expect(dayRangeInZone('2026-08-18', ZONE).dayIso).toBe('2026-08-18');
+  });
+
+  it('resolves a UTC instant to the local day it falls in', () => {
+    // 21:00Z on the 17th *is* local midnight on the 18th.
+    expect(dayRangeInZone('2026-08-17T21:00:00.000Z', ZONE).dayIso).toBe(
+      '2026-08-18',
+    );
+  });
+
+  it('resolves the reported 00:27 moment sent as an instant', () => {
+    expect(dayRangeInZone('2026-08-17T21:27:00.000Z', ZONE).dayIso).toBe(
+      '2026-08-18',
+    );
+  });
+
+  it('honours an explicit offset in the instant', () => {
+    expect(dayRangeInZone('2026-08-18T00:27:00+03:00', ZONE).dayIso).toBe(
+      '2026-08-18',
+    );
+  });
+
+  it('keeps an instant that is mid-afternoon on the same day', () => {
+    expect(dayRangeInZone('2026-08-18T09:00:00.000Z', ZONE).dayIso).toBe(
+      '2026-08-18',
+    );
+  });
+
+  it('rolls an instant past local midnight into the next day', () => {
+    // 21:30Z on the 18th is 00:30 local on the 19th.
+    expect(dayRangeInZone('2026-08-18T21:30:00.000Z', ZONE).dayIso).toBe(
+      '2026-08-19',
+    );
+  });
+
+  it('falls back to today when the string is not a usable date', () => {
+    const today = dayRangeInZone(undefined, ZONE).dayIso;
+    expect(dayRangeInZone('not-a-date', ZONE).dayIso).toBe(today);
+  });
+});
+
+/**
+ * Every other zone exercised here sits at or ahead of UTC, which hides a whole
+ * class of mistake: `new Date('2026-08-18')` parses as UTC midnight, and in a
+ * zone ahead of UTC that instant still reads as the 18th, so a calendar date
+ * routed accidentally through instant-resolution still comes out right. West
+ * of UTC it comes out a day early. These lock that direction down.
+ */
+describe('dayRangeInZone — zones behind UTC (America/New_York, UTC-4 in August)', () => {
+  const ZONE = 'America/New_York';
+
+  it('keeps a bare calendar date on the date it names', () => {
+    expect(dayRangeInZone('2026-08-18', ZONE).dayIso).toBe('2026-08-18');
+  });
+
+  it('starts that day at local midnight, which is later in UTC', () => {
+    expect(dayRangeInZone('2026-08-18', ZONE).start.toISOString()).toBe(
+      '2026-08-18T04:00:00.000Z',
+    );
+  });
+
+  it('ends that day at the next local midnight', () => {
+    expect(dayRangeInZone('2026-08-18', ZONE).end.toISOString()).toBe(
+      '2026-08-19T04:00:00.000Z',
+    );
+  });
+
+  it('still resolves a genuine instant to its local day', () => {
+    // 03:00Z on the 18th is 23:00 on the 17th in New York.
+    expect(dayRangeInZone('2026-08-18T03:00:00.000Z', ZONE).dayIso).toBe(
+      '2026-08-17',
+    );
+  });
+});
