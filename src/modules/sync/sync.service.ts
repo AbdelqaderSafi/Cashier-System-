@@ -508,6 +508,13 @@ export class SyncService {
             const newRemaining = currentRemaining.minus(requested);
             const newIsPaid = newRemaining.lte(0);
 
+            // NOT in the customer payment log. Queued offline payments write a
+            // DebtPayment only — no DebtPaymentOperation row — so they never
+            // reach `customerPayments` on GET /customers/:id. Deliberate: see
+            // the scope note on CustomerService.findOne. Adding a row here
+            // reopens the double-spend and lock-ordering questions that were
+            // ruled out of scope for the credit work, so it is its own change,
+            // not a one-liner.
             await tx.debtPayment.create({
               data: {
                 id: payment.id,

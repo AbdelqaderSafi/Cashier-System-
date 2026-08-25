@@ -2622,5 +2622,193 @@ describe('Customer credit balance (e2e)', () => {
         .set('Authorization', `Bearer ${ctx.token}`);
       expect(res.body.customerPayments).toHaveLength(1);
     });
+
+    // ─── Reversal ───────────────────────────────────────────────────────────
+    //
+    // deletePayment un-allocates the debt and withdraws any surplus, but it
+    // never touched the operation row. Now that the row is the receipt log the
+    // shop reconciles the till against, a receipt that has been fully undone
+    // must stop reading as received.
+    it('marks the record reversed once its last payment is deleted', async () => {
+      const customerId = await newCustomer('Reversed');
+      await oweOnDebt(customerId, 10); // total 100
+
+      const pay = await request(ctx.server)
+        .post(`/api/debts/customer/${customerId}/pay`)
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({ amount: 150 });
+      expect(pay.status).toBe(201);
+      // Cash just taken is not reversed.
+      expect(pay.body.payment.reversedAt).toBeNull();
+
+      const payment = await ctx.db.debtPayment.findFirst({
+        where: { operationId: pay.body.payment.id, source: 'CASH' },
+        select: { id: true, debtId: true },
+      });
+      const del = await request(ctx.server)
+        .delete(`/api/debts/${payment!.debtId}/payments/${payment!.id}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+      expect(del.status).toBe(204);
+
+      const res = await request(ctx.server)
+        .get(`/api/customers/${customerId}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+
+      const record = res.body.customerPayments[0];
+      // A real timestamp — `.not.toBeNull()` alone would pass on `undefined`.
+      expect(typeof record.reversedAt).toBe('string');
+      expect(Number.isNaN(Date.parse(record.reversedAt))).toBe(false);
+      // The row stays, and still says 150 was taken. A reversal is a new fact
+      // ABOUT the receipt, not a rewrite OF it — and the row is the
+      // idempotency anchor, so deleting it would let an offline device replay
+      // the same clientOperationId and charge the customer twice.
+      expect(record.amount).toBe('150');
+      expect(record.appliedToDebt).toBe('100');
+      expect(record.addedToCredit).toBe('50');
+    });
+
+    // One operation can hold N payments — 100 spread over two 50 debts. The
+    // per-debt DELETE reverses ONE of them, which undoes part of the receipt,
+    // not the receipt. Marking it reversed here would under-count the till by
+    // the half that still stands.
+    it('leaves the record unreversed while part of its allocation still stands', async () => {
+      const customerId = await newCustomer('Partly Reversed');
+      await oweOnDebt(customerId, 5); // 50
+      await oweOnDebt(customerId, 5); // 50
+
+      const pay = await request(ctx.server)
+        .post(`/api/debts/customer/${customerId}/pay`)
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({ amount: 100 });
+      expect(pay.status).toBe(201);
+      expect(pay.body.affectedDebts).toHaveLength(2);
+
+      const payments = await ctx.db.debtPayment.findMany({
+        where: { operationId: pay.body.payment.id, source: 'CASH' },
+        select: { id: true, debtId: true },
+      });
+      expect(payments).toHaveLength(2);
+
+      const del = await request(ctx.server)
+        .delete(`/api/debts/${payments[0].debtId}/payments/${payments[0].id}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+      expect(del.status).toBe(204);
+
+      const res = await request(ctx.server)
+        .get(`/api/customers/${customerId}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+      expect(res.body.customerPayments[0].reversedAt).toBeNull();
+    });
+
+    it("marks it reversed once the operation's other payment is deleted too", async () => {
+      const customerId = await newCustomer('Fully Reversed');
+      await oweOnDebt(customerId, 5); // 50
+      await oweOnDebt(customerId, 5); // 50
+
+      const pay = await request(ctx.server)
+        .post(`/api/debts/customer/${customerId}/pay`)
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({ amount: 100 });
+      expect(pay.status).toBe(201);
+
+      const payments = await ctx.db.debtPayment.findMany({
+        where: { operationId: pay.body.payment.id, source: 'CASH' },
+        select: { id: true, debtId: true },
+      });
+      for (const p of payments) {
+        const del = await request(ctx.server)
+          .delete(`/api/debts/${p.debtId}/payments/${p.id}`)
+          .set('Authorization', `Bearer ${ctx.token}`);
+        expect(del.status).toBe(204);
+      }
+
+      const res = await request(ctx.server)
+        .get(`/api/customers/${customerId}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+      expect(typeof res.body.customerPayments[0].reversedAt).toBe('string');
+    });
+
+    // An operation can also hold a CREDIT payment — the customer's own stored
+    // money, spent in the same call to close what the cash left open. That is
+    // not part of the cash receipt (`appliedToDebt` excludes it), so it must
+    // not keep a reversed receipt reading as received.
+    it('reverses a receipt whose only surviving payment is credit-funded', async () => {
+      const customerId = await newCustomer('Mixed Funding');
+
+      // 60 of stored credit: an overpayment with no debts to absorb it.
+      await request(ctx.server)
+        .post(`/api/debts/customer/${customerId}/pay`)
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({ amount: 60 });
+
+      // Written straight to the table on purpose. A DEBT invoice would be
+      // eaten by the stored credit on creation, and then there would be
+      // nothing left for the payment call to split.
+      await ctx.db.debt.create({
+        data: {
+          amount: new Prisma.Decimal(100),
+          paid: new Prisma.Decimal(0),
+          remaining: new Prisma.Decimal(100),
+          customerId,
+          storeId: ctx.storeId,
+        },
+      });
+
+      // 40 cash covers part; the 60 credit closes the rest — one operation
+      // holding one CASH payment and one CREDIT payment.
+      const pay = await request(ctx.server)
+        .post(`/api/debts/customer/${customerId}/pay`)
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({ amount: 40 });
+      expect(pay.status).toBe(201);
+      expect(pay.body.payment.appliedToDebt).toBe('40');
+      expect(pay.body.creditApplied).toBe('60');
+
+      const cash = await ctx.db.debtPayment.findFirst({
+        where: { operationId: pay.body.payment.id, source: 'CASH' },
+        select: { id: true, debtId: true },
+      });
+      const del = await request(ctx.server)
+        .delete(`/api/debts/${cash!.debtId}/payments/${cash!.id}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+      expect(del.status).toBe(204);
+
+      // The CREDIT payment is still there — and must not have blocked this.
+      const survivors = await ctx.db.debtPayment.count({
+        where: { operationId: pay.body.payment.id },
+      });
+      expect(survivors).toBe(1);
+
+      const res = await request(ctx.server)
+        .get(`/api/customers/${customerId}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+      const record = res.body.customerPayments.find(
+        (p: { id: string }) => p.id === pay.body.payment.id,
+      );
+      expect(typeof record.reversedAt).toBe('string');
+    });
+
+    // The list is capped at 50. Without a total, a customer with exactly 50
+    // receipts and one with 400 look identical to the client.
+    it('reports the total count alongside the capped list', async () => {
+      const customerId = await newCustomer('Capped History');
+      await ctx.db.debtPaymentOperation.createMany({
+        data: Array.from({ length: 51 }, (_, i) => ({
+          amount: new Prisma.Decimal(i + 1),
+          appliedToDebt: new Prisma.Decimal(0),
+          addedToCredit: new Prisma.Decimal(i + 1),
+          customerId,
+          storeId: ctx.storeId,
+        })),
+      });
+
+      const res = await request(ctx.server)
+        .get(`/api/customers/${customerId}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.customerPayments).toHaveLength(50);
+      expect(res.body.customerPaymentsTotal).toBe(51);
+    });
   });
 });

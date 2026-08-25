@@ -360,6 +360,18 @@ model DebtPaymentOperation {
   appliedToDebt     Decimal? @db.Decimal(10, 2)
   addedToCredit     Decimal? @db.Decimal(10, 2)
   notes             String?
+  // Set when the receipt is fully undone — every CASH payment it produced has
+  // been deleted. Null means it still stands.
+  //
+  // The row itself is never deleted: it is the idempotency anchor, and dropping
+  // it would let an offline device replay the same clientOperationId and take
+  // the money a second time. A reversal is a new fact ABOUT the receipt, so
+  // `amount` and the split stay exactly as they were recorded.
+  //
+  // Only a FULL reversal sets this. One operation can hold several payments —
+  // 100 spread over two 50 debts — and deleting one of them undoes part of the
+  // receipt, not the receipt.
+  reversedAt        DateTime?
   date              DateTime @default(now())
 
   customerId String

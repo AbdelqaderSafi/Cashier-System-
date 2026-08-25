@@ -38,6 +38,7 @@ export type CustomerPaymentRow = {
   appliedToDebt: Prisma.Decimal | null;
   addedToCredit: Prisma.Decimal | null;
   notes: string | null;
+  reversedAt: Date | null;
   date: Date;
   clientOperationId: string | null;
   creditEntries?: { delta: Prisma.Decimal; reason: CreditReason }[];
@@ -89,6 +90,11 @@ export function toCustomerPayment(op: CustomerPaymentRow) {
     addedToCredit: added.toString(),
     notes: op.notes,
     paidAt: op.date,
+    // Non-null means this receipt was fully undone — the money is no longer in
+    // the drawer. A till total that sums these rows must skip them. The
+    // amounts above are left as they were recorded on purpose: they say what
+    // was taken, and `reversedAt` says it was given back.
+    reversedAt: op.reversedAt,
     clientOperationId: op.clientOperationId,
   };
 }
@@ -269,6 +275,13 @@ export class DebtService {
   // transaction so two concurrent pay() calls on the same debt cannot
   // overpay or race on the remaining balance. All arithmetic uses
   // Prisma.Decimal to avoid the 0.1 + 0.2 floating-point drift.
+  //
+  // NOT in the customer payment log. This route takes real cash and writes a
+  // DebtPayment only — no DebtPaymentOperation row — so it never appears in
+  // `customerPayments` on GET /customers/:id. That is deliberate, not an
+  // oversight: see the scope note on CustomerService.findOne. Anyone adding a
+  // row here is widening a documented boundary, so update that note and the
+  // frontend handoff along with it.
 
   async pay(sid: string, id: string, dto: PayDebtDto) {
     const amount = new Prisma.Decimal(dto.amount);
@@ -543,6 +556,38 @@ export class DebtService {
         }
 
         await tx.debtPayment.delete({ where: { id: paymentId } });
+
+        // Stop the receipt reading as received once nothing it funded is left.
+        //
+        // The operation row is what GET /customers/:id renders as the shop's
+        // payment log, and the owner reconciles the drawer against it. Without
+        // this, a 150 that has been completely undone still reports "received
+        // 150" and the day comes up short with no explanation.
+        //
+        // Counted, not assumed: one operation can hold several payments — 100
+        // spread over two 50 debts — and deleting the first of them undoes half
+        // the receipt, not the receipt. Flagging it there would make the log
+        // short by the half that still stands.
+        //
+        // CASH only. A CREDIT payment on this operation is the customer's own
+        // stored money being spent in the same call, not part of the cash that
+        // crossed the counter — `appliedToDebt` excludes it for the same
+        // reason. Leaving one behind must not keep a reversed receipt alive.
+        //
+        // The row is never deleted: it holds the unique clientOperationId that
+        // makes an offline retry idempotent, so dropping it would let that
+        // retry charge the customer a second time.
+        if (payment.operationId) {
+          const cashStillAllocated = await tx.debtPayment.count({
+            where: { operationId: payment.operationId, source: 'CASH' },
+          });
+          if (cashStillAllocated === 0) {
+            await tx.debtPaymentOperation.update({
+              where: { id: payment.operationId },
+              data: { reversedAt: new Date() },
+            });
+          }
+        }
 
         await tx.debt.update({
           where: { id: debtId },

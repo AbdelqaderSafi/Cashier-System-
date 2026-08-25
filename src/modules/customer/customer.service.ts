@@ -225,6 +225,22 @@ export class CustomerService {
     //
     // Spending stored credit on a later invoice creates no row here, because
     // no new cash was received; it is the customer's own money moving.
+    //
+    // ── SCOPE. Read this before building a "payment history" screen on it. ──
+    //
+    // This covers ONE cash route: POST /debts/customer/:customerId/pay. Two
+    // other routes take real money and produce nothing here:
+    //
+    //   POST /debts/:id/pay   — paying a single debt directly
+    //   POST /sync/push       — the offline outbox replaying queued payments
+    //
+    // So this is the customer-level payment log, NOT the customer's complete
+    // payment history, and the two differ by however much the shop collects
+    // through those routes. Widening it is not a matter of adding a write —
+    // sync/push would reopen the double-spend and lock-ordering problems that
+    // were ruled out of scope for the credit work. A complete history is its
+    // own change with its own scope; until then this name promises less than
+    // it sounds like, and the frontend must be told so.
     const operations = await this.db.debtPaymentOperation.findMany({
       where: { customerId: id, storeId: sid },
       include: CUSTOMER_PAYMENT_INCLUDE,
@@ -233,8 +249,17 @@ export class CustomerService {
       orderBy: [{ date: 'desc' }, { id: 'desc' }],
       // Capped like the sibling `invoices` list on this same response — a
       // long-standing customer's history should not grow the till payload
-      // without bound.
+      // without bound. `customerPaymentsTotal` below keeps the cap from being
+      // silent: 50 rows and a total of 400 says plainly that this is a window,
+      // not the whole log.
       take: 50,
+    });
+
+    // Row count, not a sum of money — same meaning `total` carries in this
+    // repo's pagination meta. Reversed receipts are counted: they are still
+    // entries in the log, just ones that were given back.
+    const customerPaymentsTotal = await this.db.debtPaymentOperation.count({
+      where: { customerId: id, storeId: sid },
     });
 
     return {
@@ -244,6 +269,7 @@ export class CustomerService {
         totalRemaining,
       ).toString(),
       customerPayments: operations.map(toCustomerPayment),
+      customerPaymentsTotal,
     };
   }
 
