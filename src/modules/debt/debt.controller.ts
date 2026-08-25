@@ -21,6 +21,7 @@ import {
 } from '@nestjs/swagger';
 import { DebtService } from './debt.service';
 import { PayDebtDto } from './dto/pay-debt.dto';
+import { PayCustomerDebtDto } from './dto/pay-customer-debt.dto';
 import { DebtQueryDto } from './dto/debt-query.dto';
 import { JwtGuard } from '../../common/guards/jwt.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -83,19 +84,29 @@ export class DebtController {
   @Roles('ADMIN', 'CASHIER')
   @ApiOperation({
     summary:
-      'تسديد مبلغ من الدين الكلي للعميل — يوزّع المبلغ تلقائياً على الديون من الأقدم للأحدث',
+      'تسديد مبلغ من الدين الكلي للعميل — يوزّع المبلغ على الديون من الأقدم للأحدث، ويحفظ أي فائض كرصيد للعميل',
   })
   @ApiParam({ name: 'customerId', format: 'uuid', description: 'معرّف العميل' })
   @ApiResponse({
     status: 201,
-    description: 'تم تسجيل الدفعة وتوزيعها — يعيد ملخص الديون المحدّث',
+    description:
+      'تم تسجيل الدفعة — يعيد الديون المتأثرة والرصيد الجديد والملخص المحدّث. إعادة نفس clientOperationId تُرجِع النتيجة الأصلية بدون تحريك أي مبلغ',
   })
-  @ApiResponse({ status: 400, description: 'لا توجد ديون أو المبلغ يتجاوز الإجمالي' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'المبلغ صفر أو سالب أو بأكثر من خانتين عشريتين أو يتجاوز الحد الأقصى',
+  })
   @ApiResponse({ status: 404, description: 'العميل غير موجود' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'تعارض على مُعرّف العملية: إما طلب متزامن بنفس clientOperationId، أو نفس المُعرّف مُستخدم مسبقاً لعميل آخر',
+  })
   payForCustomer(
     @StoreId() sid: string,
     @Param('customerId', ParseUUIDPipe) customerId: string,
-    @Body() dto: PayDebtDto,
+    @Body() dto: PayCustomerDebtDto,
   ) {
     return this.debtService.payForCustomer(sid, customerId, dto);
   }

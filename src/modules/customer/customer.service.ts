@@ -11,9 +11,13 @@ import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { CustomerQueryDto } from './dto/customer-query.dto';
 import { paginate, paginatedResponse } from '../../common/utils/pagination';
 import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
+import { signedBalance } from '../debt/credit.util';
+import { lockCustomerForCredit, takeCredit } from '../debt/credit.tx';
+
+export type CustomerWithBalance = Customer & { balance: string };
 
 export type PaginatedCustomers = {
-  data: Customer[];
+  data: CustomerWithBalance[];
   meta: {
     total: number;
     page: number;
@@ -112,7 +116,33 @@ export class CustomerService {
       this.db.customer.count({ where }),
     ]);
 
-    return paginatedResponse(data, total, page, limit);
+    // One groupBy for the whole page, not a query per row.
+    const owed = await this.db.debt.groupBy({
+      by: ['customerId'],
+      where: {
+        storeId: sid,
+        isPaid: false,
+        customerId: { in: data.map((c) => c.id) },
+      },
+      _sum: { remaining: true },
+    });
+    const owedById = new Map(
+      owed.map((o) => [
+        o.customerId,
+        new Prisma.Decimal(o._sum.remaining ?? 0),
+      ]),
+    );
+    const zero = new Prisma.Decimal(0);
+
+    const withBalance = data.map((c) => ({
+      ...c,
+      balance: signedBalance(
+        new Prisma.Decimal(c.creditBalance),
+        owedById.get(c.id) ?? zero,
+      ).toString(),
+    }));
+
+    return paginatedResponse(withBalance, total, page, limit);
   }
 
   // ─── Find one by ID (with invoices + debts) ───────────────────────────────────
@@ -177,7 +207,19 @@ export class CustomerService {
 
     if (!customer) throw new NotFoundException('Customer not found');
 
-    return customer;
+    const owed = await this.db.debt.aggregate({
+      where: { customerId: id, storeId: sid, isPaid: false },
+      _sum: { remaining: true },
+    });
+    const totalRemaining = new Prisma.Decimal(owed._sum.remaining ?? 0);
+
+    return {
+      ...customer,
+      balance: signedBalance(
+        new Prisma.Decimal(customer.creditBalance),
+        totalRemaining,
+      ).toString(),
+    };
   }
 
   // ─── Update ───────────────────────────────────────────────────────────────────
@@ -204,34 +246,75 @@ export class CustomerService {
 
   // ─── Delete ───────────────────────────────────────────────────────────────────
 
-  async remove(sid: string, id: string): Promise<void> {
+  // `forfeitCredit`: an explicit, audited escape hatch for the customer who
+  // holds credit with no route left to clear it — e.g. an overpayment on a
+  // customer who owed nothing (no debt, so no debt_payments row ever
+  // existed) or an invoice void that cascaded the originating debt away.
+  // Defaults to false so every existing caller keeps today's behaviour.
+  async remove(sid: string, id: string, forfeitCredit = false): Promise<void> {
 
-    const customer = await this.db.customer.findFirst({
-      where: { id, storeId: sid, isDeleted: false },
-      select: {
-        id: true,
-        debts: { select: { id: true, isPaid: true } },
-      },
+    // Without the lock, the creditBalance > 0 check and the isDeleted write
+    // are two unlocked statements — a payForCustomer/pay/spendCreditOnDebt
+    // committing between them can archive a customer who holds credit at the
+    // moment of the write, exactly what this guard exists to prevent: a
+    // customer the shop owes money to, hidden from /customers and
+    // /sync/init. lockCustomerForCredit first (no allowArchived — this is a
+    // fresh check against a customer who must still be live) serialises
+    // against every other credit-touching transaction, all of which take the
+    // same lock first.
+    await this.db.$transaction(async (tx) => {
+      const locked = await lockCustomerForCredit(tx, sid, id);
+
+      const debts = await tx.debt.findMany({
+        where: { customerId: id, storeId: sid },
+        select: { id: true, isPaid: true },
+      });
+
+      const hasUnpaidDebts = debts.some((d) => !d.isPaid);
+      if (hasUnpaidDebts) {
+        throw new BadRequestException(
+          'لا يمكن حذف العميل — لديه ديون غير مسددة. يجب تسوية جميع الديون أولاً.',
+        );
+      }
+
+      // Archiving hides the row from /customers and /sync/init (both filter
+      // isDeleted: false) while the shop still owes the money. Without
+      // forfeitCredit, a customer who genuinely has no route to clear the
+      // balance (no debt to spend it on, no debt_payments row to delete) is
+      // stuck here forever — that is exactly what forfeitCredit is for.
+      if (locked.creditBalance.gt(0)) {
+        if (!forfeitCredit) {
+          throw new BadRequestException(
+            'لا يمكن أرشفة العميل — لديه رصيد لم يُستخدم بعد. اصرف الرصيد على فاتورة أو دين جديد له، أو أرشفه مع إسقاط الرصيد بإرسال forfeitCredit=true.',
+          );
+        }
+
+        // Audited forfeit, same transaction as the archive: a real
+        // credit_entries row (reason OVERPAYMENT_REVERSED — a forfeit is a
+        // withdrawal, same direction as an ordinary surplus clawback) so an
+        // auditor can see the balance was deliberately zeroed at archive
+        // time, not silently dropped.
+        await takeCredit(tx, {
+          sid,
+          customerId: id,
+          currentBalance: locked.creditBalance,
+          amount: locked.creditBalance,
+          reason: 'OVERPAYMENT_REVERSED',
+          notes:
+            'إسقاط الرصيد عند أرشفة العميل — لا يوجد دين أو دفعة لصرفه عليها',
+        });
+      }
+
+      // Soft delete (archive): keep historical invoices/debts intact and just
+      // hide the customer from the cashier's UI. Avoids FK constraint
+      // violations on related debts/invoices.
+      await tx.customer.update({
+        where: { id },
+        data: { isDeleted: true, deletedAt: new Date() },
+      });
     });
 
-    if (!customer) throw new NotFoundException('Customer not found');
-
-    const hasUnpaidDebts = customer.debts.some((d) => !d.isPaid);
-    if (hasUnpaidDebts) {
-      throw new BadRequestException(
-        'Cannot delete customer with outstanding unpaid debts. Settle all debts first.',
-      );
-    }
-
-    // Soft delete (archive): keep historical invoices/debts intact and just hide
-    // the customer from the cashier's UI. Avoids FK constraint violations on
-    // related debts/invoices.
-    await this.db.customer.update({
-      where: { id },
-      data: { isDeleted: true, deletedAt: new Date() },
-    });
-
-    void this.cacheInvalidator.invalidateStoreData(sid);
+    await this.cacheInvalidator.invalidateStoreData(sid);
   }
 
   // ─── Summary: total outstanding debts for a customer ─────────────────────────
@@ -240,7 +323,7 @@ export class CustomerService {
 
     const customer = await this.db.customer.findFirst({
       where: { id, storeId: sid, isDeleted: false },
-      select: { id: true, name: true, phone: true },
+      select: { id: true, name: true, phone: true, creditBalance: true },
     });
     if (!customer) throw new NotFoundException('Customer not found');
 
@@ -273,14 +356,19 @@ export class CustomerService {
     );
     const unpaidCount = debts.filter((d) => !d.isPaid).length;
 
+    const creditBalance = new Prisma.Decimal(customer.creditBalance);
+
     return {
-      customer,
+      customer: { id: customer.id, name: customer.name, phone: customer.phone },
       summary: {
         totalDebt: totalDebt.toString(),
         totalPaid: totalPaid.toString(),
         totalRemaining: totalRemaining.toString(),
         unpaidCount,
         totalDebts: debts.length,
+        totalAmount: totalDebt.toString(),
+        creditBalance: creditBalance.toString(),
+        balance: signedBalance(creditBalance, totalRemaining).toString(),
       },
       debts,
     };

@@ -72,7 +72,9 @@ async function teardown(ctx: Ctx): Promise<void> {
   // Cascade: store → invoices → items / debts → payments. Delete order matters
   // because debt has FKs both to customer and to invoice.
   const { db, storeId } = ctx;
+  await db.creditEntry.deleteMany({ where: { storeId } });
   await db.debtPayment.deleteMany({ where: { debt: { storeId } } });
+  await db.debtPaymentOperation.deleteMany({ where: { storeId } });
   await db.debt.deleteMany({ where: { storeId } });
   await db.invoiceItem.deleteMany({ where: { invoice: { storeId } } });
   await db.invoice.deleteMany({ where: { storeId } });

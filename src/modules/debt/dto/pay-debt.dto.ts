@@ -12,7 +12,8 @@ import { Type } from 'class-transformer';
 export class PayDebtDto {
   @ApiProperty({
     example: 250.0,
-    description: 'المبلغ المدفوع — يجب أن يكون أكبر من صفر ولا يتجاوز المبلغ المتبقي',
+    description:
+      'المبلغ المدفوع — يجب أن يكون أكبر من صفر ولا يتجاوز المبلغ المتبقي على هذا الدين. للدفع الزائد استخدم POST /debts/customer/:customerId/pay',
   })
   @IsNotEmpty({ message: 'المبلغ المدفوع مطلوب' })
   @IsNumber({ maxDecimalPlaces: 2 }, { message: 'المبلغ يجب أن يكون رقماً بحد أقصى خانتين عشريتين' })

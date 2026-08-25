@@ -69,7 +69,9 @@ async function bootstrap(): Promise<Ctx> {
 
 async function teardown(ctx: Ctx): Promise<void> {
   const { db, storeId } = ctx;
+  await db.creditEntry.deleteMany({ where: { storeId } });
   await db.debtPayment.deleteMany({ where: { debt: { storeId } } });
+  await db.debtPaymentOperation.deleteMany({ where: { storeId } });
   await db.debt.deleteMany({ where: { storeId } });
   await db.invoiceItem.deleteMany({ where: { invoice: { storeId } } });
   await db.invoice.deleteMany({ where: { storeId } });

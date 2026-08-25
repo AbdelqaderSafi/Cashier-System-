@@ -30,6 +30,8 @@ model Store {
   customers         Customer[]
   invoices          Invoice[]
   debts             Debt[]
+  creditEntries     CreditEntry[]
+  paymentOps        DebtPaymentOperation[]
 
   @@map("stores")
 }
@@ -113,6 +115,15 @@ model Customer {
   id        String    @id @default(uuid())
   name      String
   phone     String?
+
+  // Money the shop is holding for this customer, from an overpayment. Never
+  // negative — customer_credit_non_negative enforces that as a backstop, and
+  // the service layer rejects the request long before the DB sees it. Kept in
+  // lockstep with SUM(credit_entries.delta) by every write holding
+  // SELECT ... FOR UPDATE on this row, the same way debts.paid tracks
+  // debt_payments with no constraint tying them.
+  creditBalance Decimal @default(0) @db.Decimal(10, 2)
+
   isDeleted Boolean   @default(false)
   deletedAt DateTime?
   createdAt DateTime  @default(now())
@@ -131,6 +142,8 @@ model Customer {
   // Relations
   invoices  Invoice[]
   debts     Debt[]
+  creditEntries CreditEntry[]
+  paymentOps    DebtPaymentOperation[]
 
   @@unique([storeId, clientCustomerId]) // Idempotency: one customer per client key per store
   @@index([storeId, isDeleted])
@@ -232,6 +245,29 @@ model InvoiceItem {
   @@map("invoice_items")
 }
 
+// Where the money for a debt payment came from. Every payment that existed
+// before customer credit was cash, which is what the column default gives
+// them. A CREDIT payment is funded from customers.creditBalance and must be
+// excluded from cash-revenue reporting and from the "has payments" guards
+// that block editing or voiding an invoice.
+enum PaymentSource {
+  CASH
+  CREDIT
+}
+
+// Directional on purpose. A single REVERSAL value would serve two opposite
+// movements — credit handed back to the customer (delta > 0) and credit
+// clawed back from them (delta < 0) — and the daily reports in
+// InvoiceService.getDailySales could not tell which bucket an entry belongs
+// to. Invariant: OVERPAYMENT and APPLIED_REVERSED always carry delta > 0;
+// APPLIED_TO_DEBT and OVERPAYMENT_REVERSED always carry delta < 0.
+enum CreditReason {
+  OVERPAYMENT           // cash surplus became credit
+  OVERPAYMENT_REVERSED  // surplus withdrawn (a cash payment was deleted)
+  APPLIED_TO_DEBT       // credit spent settling a debt
+  APPLIED_REVERSED      // credit returned (invoice deleted/edited, CREDIT payment deleted)
+}
+
 // Debts
 model Debt {
   id        String   @id @default(uuid())
@@ -271,10 +307,88 @@ model DebtPayment {
   date      DateTime @default(now())
   notes     String?
 
+  // Funding source. NOT cosmetic: a CREDIT payment must be excluded from the
+  // `payments.length > 0` guards that block invoice edit/void, and reversed
+  // back into creditBalance when it is deleted.
+  source    PaymentSource @default(CASH)
+
   // Foreign key
   debtId    String
   debt      Debt     @relation(fields: [debtId], references: [id], onDelete: Cascade)
 
+  // The customer-level pay operation that produced this row. NULL means "no
+  // operation" — every payment written before this migration, and every
+  // payment sync/push creates. Those never produced a surplus, so their
+  // deletion behaves exactly as it does today.
+  operationId String?
+  operation   DebtPaymentOperation? @relation(fields: [operationId], references: [id])
+
+  creditEntry CreditEntry?
+
   @@index([debtId, date(sort: Desc)])
+  @@index([operationId])
   @@map("debt_payments")
+}
+
+// One customer-level pay operation. Needed because a single client action
+// fans out into N DebtPayment rows plus at most one credit movement, so no
+// existing row represents "the operation" — and DebtPayment has no storeId,
+// so it cannot host @@unique([storeId, clientOperationId]) at all.
+//
+// A row is written for EVERY call, even when there is no surplus and no
+// client key, so the key always has an anchor to attach to.
+model DebtPaymentOperation {
+  id                String   @id @default(uuid())
+  // Client-supplied idempotency key (the offline outbox's stable id). NULL is
+  // allowed and PostgreSQL treats multiple NULLs as distinct in a unique
+  // index, so online-only calls are unconstrained — same trick as
+  // invoices_storeId_clientInvoiceId_key.
+  clientOperationId String?
+  amount            Decimal  @db.Decimal(10, 2)
+  date              DateTime @default(now())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+  storeId    String
+  store      Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  payments      DebtPayment[]
+  creditEntries CreditEntry[]
+
+  @@unique([storeId, clientOperationId])
+  @@index([storeId, customerId, date(sort: Desc)])
+  @@map("debt_payment_operations")
+}
+
+// Audit ledger for customers.creditBalance. SUM(delta) per customer must
+// always equal the denormalized column; no CHECK can express that (PostgreSQL
+// CHECKs are row-local), so the invariant is held by every writer taking
+// SELECT ... FOR UPDATE on the customer row first.
+model CreditEntry {
+  id           String       @id @default(uuid())
+  delta        Decimal      @db.Decimal(10, 2)
+  // Snapshot of creditBalance immediately after this entry, so an auditor can
+  // read one row instead of replaying the whole ledger.
+  balanceAfter Decimal      @db.Decimal(10, 2)
+  reason       CreditReason
+  notes        String?
+  date         DateTime     @default(now())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+  storeId    String
+  store      Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  // The CREDIT payment this entry funded, when there is one. SetNull because
+  // debt_payments cascade away with their debt (and so with their invoice),
+  // and the ledger row has to outlive them.
+  debtPaymentId String?      @unique
+  debtPayment   DebtPayment? @relation(fields: [debtPaymentId], references: [id], onDelete: SetNull)
+  operationId   String?
+  operation     DebtPaymentOperation? @relation(fields: [operationId], references: [id])
+
+  @@index([storeId, customerId, date(sort: Desc)])
+  @@index([storeId, reason, date(sort: Desc)]) // daily-sales credit lines
+  @@index([customerId])
+  @@map("credit_entries")
 }

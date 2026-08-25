@@ -24,6 +24,7 @@ import { CustomerService } from './customer.service';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { CustomerQueryDto } from './dto/customer-query.dto';
+import { RemoveCustomerQueryDto } from './dto/remove-customer-query.dto';
 import { JwtGuard } from '../../common/guards/jwt.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { TenantGuard } from '../../common/guards/tenant.guard';
@@ -96,13 +97,27 @@ export class CustomerController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
     summary:
-      'حذف عميل نهائياً (للمدير فقط). يُمنع الحذف إذا كان لديه ديون غير مسددة.',
+      'حذف عميل نهائياً (للمدير فقط). يُمنع الحذف إذا كان لديه ديون غير مسددة أو رصيد لم يُستخدم — إلا بإرسال forfeitCredit=true لإسقاط الرصيد وأرشفته.',
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف العميل' })
+  @ApiQuery({
+    name: 'forfeitCredit',
+    required: false,
+    type: Boolean,
+    description:
+      'إسقاط رصيد العميل نهائياً وأرشفته رغم وجود رصيد لم يُستخدم (للمدير فقط)',
+  })
   @ApiResponse({ status: 204, description: 'تم حذف العميل' })
-  @ApiResponse({ status: 400, description: 'لا يمكن الحذف — يوجد ديون غير مسددة' })
+  @ApiResponse({
+    status: 400,
+    description: 'لا يمكن الحذف — يوجد ديون غير مسددة أو رصيد لم يُستخدم',
+  })
   @ApiResponse({ status: 404, description: 'العميل غير موجود' })
-  async remove(@StoreId() sid: string, @Param('id', ParseUUIDPipe) id: string) {
-    await this.customerService.remove(sid, id);
+  async remove(
+    @StoreId() sid: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: RemoveCustomerQueryDto,
+  ) {
+    await this.customerService.remove(sid, id, query.forfeitCredit ?? false);
   }
 }

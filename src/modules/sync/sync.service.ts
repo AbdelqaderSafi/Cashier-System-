@@ -73,7 +73,13 @@ export class SyncService {
           customer: { select: { id: true, name: true, phone: true } },
           invoice: { select: { id: true, number: true, date: true } },
           payments: {
-            select: { id: true, amount: true, date: true, notes: true },
+            select: {
+              id: true,
+              amount: true,
+              date: true,
+              notes: true,
+              source: true,
+            },
             orderBy: { date: 'desc' },
           },
         },
@@ -277,6 +283,15 @@ export class SyncService {
           report.invoices.skipped = existingInvoiceIds.size;
 
           if (newInvoices.length > 0) {
+            // Lock order: Store → Customer → Debts → Invoices. This update
+            // takes the store row first; the invoice/debt createMany calls
+            // below reference customerId by FK, and each FK insert takes
+            // FOR KEY SHARE on the referenced customer row — which conflicts
+            // with a customer-first FOR UPDATE. Anything that locks a
+            // customer before touching invoices/debts (e.g.
+            // InvoiceService.create) must lock the store first too, or the
+            // two paths can deadlock. Comment only — no behaviour change.
+            //
             // One atomic counter bump allocates all N numbers at once.
             // The block we own is (lastInvoiceNumber - N + 1 .. lastInvoiceNumber).
             const store = await tx.store.update({
