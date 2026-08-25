@@ -3,6 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { Prisma } from 'generated/prisma/client';
 import { DatabaseService } from '../database/database.service';
 import { MailService } from '../mail/mail.service';
+import { netCustomerDebt } from './debt-netting.util';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -188,6 +189,7 @@ export class BackupService {
       select: {
         name: true,
         phone: true,
+        creditBalance: true,
         debts: {
           where: { isPaid: false },
           select: { remaining: true, date: true },
@@ -196,8 +198,8 @@ export class BackupService {
     });
 
     const now = Date.now();
-    const rows = customers.map<CustomerDebtRow>((c) => {
-      const total = c.debts.reduce(
+    const rows = customers.flatMap<CustomerDebtRow>((c) => {
+      const gross = c.debts.reduce(
         (acc, d) => acc.plus(new Prisma.Decimal(d.remaining)),
         new Prisma.Decimal(0),
       );
@@ -207,13 +209,27 @@ export class BackupService {
       );
       const oldestDebtDays = Math.max(0, Math.floor((now - oldestMs) / DAY_MS));
 
-      return {
-        name: c.name,
-        phone: c.phone,
-        totalRemaining: total,
-        debtCount: c.debts.length,
+      // Net the customer's own credit against their own debt — see
+      // netCustomerDebt for the rule (and why the amount is netted but the
+      // age isn't). A customer whose credit covers what they owe is not a
+      // debtor and must not appear in the "الأولوية القصوى" list or in
+      // debtorCount, which netCustomerDebt signals with a null return.
+      const netted = netCustomerDebt({
+        grossRemaining: gross,
+        creditBalance: c.creditBalance,
         oldestDebtDays,
-      };
+      });
+      if (!netted) return [];
+
+      return [
+        {
+          name: c.name,
+          phone: c.phone,
+          totalRemaining: netted.totalRemaining,
+          debtCount: c.debts.length,
+          oldestDebtDays: netted.oldestDebtDays,
+        },
+      ];
     });
 
     rows.sort((a, b) => b.totalRemaining.comparedTo(a.totalRemaining));

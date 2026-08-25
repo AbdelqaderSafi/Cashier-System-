@@ -15,6 +15,13 @@ import { buildInvoiceItem, stockPiecesOf, type BuiltInvoiceItem } from './invoic
 import { applyInvoiceDiscount } from './invoice-discount.util';
 import { dayRangeInZone } from '../../common/utils/day-range.util';
 import { env } from '../../common/config/env';
+import {
+  lockCustomerForCredit,
+  spendCreditOnDebt,
+  reverseCreditOnDebt,
+  type LockedCustomer,
+} from '../debt/credit.tx';
+import { cashPaidOf, paidAtSaleOf } from '../debt/credit.util';
 
 export type PaginatedInvoices = {
   data: Invoice[];
@@ -150,6 +157,22 @@ export class InvoiceService {
 
     const invoice = await this.db.$transaction(
       async (tx) => {
+        // Lock order: Store → Customer → Debts → Invoices. Store first, then
+        // Customer — the order every credit-touching transaction follows.
+        // `create` serialises on this row anyway via the lastInvoiceNumber
+        // increment below; taking it explicitly here just makes the order
+        // true at the top instead of three steps in, so a concurrent
+        // sync/push (which locks the store first and then touches customer
+        // rows through FK inserts) cannot form a cycle. A 40P01 deadlock is
+        // unmapped by PrismaExceptionFilter and would reach the till as a
+        // 500.
+        await tx.$executeRaw`SELECT id FROM stores WHERE id = ${sid} FOR UPDATE`;
+
+        let lockedCustomer: LockedCustomer | null = null;
+        if (customerId) {
+          lockedCustomer = await lockCustomerForCredit(tx, sid, customerId);
+        }
+
         // 0) Idempotency short-circuit — only when the client opted in by
         //    sending a stable key (the offline outbox does this; the regular
         //    online "ring up a sale" flow doesn't and falls through).
@@ -244,9 +267,18 @@ export class InvoiceService {
           },
         });
 
-        // 4) Optional linked debt for DEBT / PARTIAL.
+        // 4) Optional linked debt for DEBT / PARTIAL, then spend any credit
+        //    the customer is holding against it.
+        //
+        //    This fires for PARTIAL too, and that is intended: credit settles
+        //    the deferred portion exactly as a later cash payment would. The
+        //    resulting `paymentMethod = PARTIAL, paid = total` state is not
+        //    new — a partial invoice reaches it today the moment the customer
+        //    clears the debt through DebtService.pay. The create-time
+        //    `paidAmount.gte(total)` check validates the SUBMITTED paid, and
+        //    runs before any of this.
         if (needsCustomer) {
-          await tx.debt.create({
+          const debt = await tx.debt.create({
             data: {
               amount: remaining,
               paid: new Prisma.Decimal(0),
@@ -256,6 +288,34 @@ export class InvoiceService {
               storeId: sid,
             },
           });
+
+          // spendCreditOnDebt is itself a no-op when there is nothing to
+          // apply — this guard only exists to skip the call on the common
+          // path where the customer holds no credit at all.
+          if (lockedCustomer && lockedCustomer.creditBalance.gt(0)) {
+            const { applied } = await spendCreditOnDebt(tx, {
+              sid,
+              customerId: customerId!,
+              currentBalance: lockedCustomer.creditBalance,
+              debtId: debt.id,
+              debtRemaining: remaining,
+              invoiceId: invoice.id,
+            });
+
+            if (applied.gt(0)) {
+              // spendCreditOnDebt updated the invoice's paid/remaining and
+              // discarded the result — re-read so what we return (and what
+              // the controller sends to the till) reflects the credit that
+              // was just applied, not the pre-credit snapshot from step 3.
+              return tx.invoice.findUniqueOrThrow({
+                where: { id: invoice.id },
+                include: {
+                  items: true,
+                  customer: { select: { id: true, name: true, phone: true } },
+                },
+              });
+            }
+          }
         }
 
         return invoice;
@@ -270,7 +330,10 @@ export class InvoiceService {
       },
     );
 
-    void this.cacheInvalidator.invalidateStoreData(sid);
+    // Awaited, not fire-and-forget: this path can move a customer's credit,
+    // and a 30s stale balance is what the cashier decides how much cash to
+    // take against.
+    await this.cacheInvalidator.invalidateStoreData(sid);
     return invoice;
   }
 
@@ -302,7 +365,10 @@ export class InvoiceService {
             paid: true,
             remaining: true,
             isPaid: true,
-            payments: { select: { id: true } },
+            // `source` is load-bearing here, not diagnostic: these rows feed the
+            // three pre-transaction guards below, and a CREDIT payment must not
+            // count as "someone has paid this".
+            payments: { select: { id: true, amount: true, source: true } },
           },
         },
       },
@@ -406,11 +472,26 @@ export class InvoiceService {
         remaining = total;
         break;
       case 'PARTIAL': {
-        // Use the provided paid amount or fall back to the invoice's existing paid amount
+        // Use the provided paid amount, or recover what was actually paid AT
+        // THE TILL from the invoice.
+        //
+        // Raw `invoice.paid` is the wrong number: DebtService.pay,
+        // payForCustomer and spendCreditOnDebt all mirror repayments onto it,
+        // so it climbs toward `total` as the debt is settled. Since `remaining`
+        // below becomes the debt's new principal, every repayment left inside
+        // this figure gets subtracted from the principal a second time — a
+        // notes-only PATCH would forgive exactly what the customer had already
+        // handed over, and once the debt was fully repaid `invoice.paid` hit
+        // `total` and the gte(total) guard froze the invoice against any edit.
+        //
+        // paidAtSaleOf strips ALL repayments (cash and credit alike), which is
+        // what makes it the at-sale amount. Deliberately not cashPaidOf: that
+        // answers a different question about `debts.paid` and strips only
+        // CREDIT rows, which is precisely how the cash case stayed broken.
         const paidAmount =
           dto.paid !== undefined
             ? new Prisma.Decimal(dto.paid)
-            : new Prisma.Decimal(invoice.paid);
+            : paidAtSaleOf(invoice.paid, invoice.debt?.payments ?? []);
         if (paidAmount.gte(total)) {
           throw new BadRequestException(
             `المبلغ المدفوع يجب أن يكون أقل من المبلغ المستحق بعد الخصم (${total.toString()}) عند الدفع الجزئي`,
@@ -429,9 +510,14 @@ export class InvoiceService {
     }
 
     // 6. Debt constraints
+    // Payments funded from the customer's own credit are reversible, so they
+    // must not count as "someone has paid this". Only cash locks an invoice.
+    const cashPayments =
+      invoice.debt?.payments.filter((p) => p.source === 'CASH') ?? [];
+
     if (wasDebt && !needsCustomer) {
-      // Switching from DEBT/PARTIAL → CASH/ONLINE: block if payments already recorded
-      if (invoice.debt && invoice.debt.payments.length > 0) {
+      // Switching from DEBT/PARTIAL → CASH/ONLINE: block if cash was recorded
+      if (cashPayments.length > 0) {
         throw new BadRequestException(
           'لا يمكن تغيير طريقة الدفع — الدين عليه دفعات مسجلة. قم بتسوية الدين أولاً.',
         );
@@ -439,27 +525,26 @@ export class InvoiceService {
     }
 
     if (wasDebt && needsCustomer && invoice.debt) {
-      // Updating existing debt: new remaining must not be less than payments already made
-      const alreadyPaidOnDebt = new Prisma.Decimal(invoice.debt.paid);
-      if (remaining.lt(alreadyPaidOnDebt)) {
+      // The new remaining must not fall below what was paid in CASH. Comparing
+      // against debt.paid would be wrong: credit makes it non-zero from the
+      // moment the debt is created, so a fully credit-covered invoice could
+      // never be corrected downward.
+      const alreadyPaidInCash = cashPaidOf(
+        invoice.debt.paid,
+        invoice.debt.payments,
+      );
+      if (remaining.lt(alreadyPaidInCash)) {
         throw new BadRequestException(
-          `لا يمكن تعديل الفاتورة — المبلغ المتبقي الجديد (${remaining.toString()}) أقل مما تم دفعه فعلاً على الدين (${alreadyPaidOnDebt.toString()})`,
+          `لا يمكن تعديل الفاتورة — المبلغ المتبقي الجديد (${remaining.toString()}) أقل مما تم دفعه فعلاً على الدين (${alreadyPaidInCash.toString()})`,
         );
       }
     }
 
-    // Changing the discount moves the invoice total, and the debt recompute
-    // below cannot reconcile that against payments already recorded: a DEBT
-    // invoice has its `paid` reset to 0 while debts.paid keeps them (the next
-    // payment then trips invoice_balance_consistent and the debt becomes
-    // unpayable), and a PARTIAL invoice subtracts them twice and silently
-    // writes the balance off. Refuse instead, the same way a payment-method
-    // change is refused.
     if (
       dto.discount !== undefined &&
       wasDebt &&
       invoice.debt &&
-      invoice.debt.payments.length > 0
+      cashPayments.length > 0
     ) {
       throw new BadRequestException(
         'لا يمكن تعديل الخصم — الدين عليه دفعات مسجلة. قم بتسوية الدين أولاً.',
@@ -469,6 +554,79 @@ export class InvoiceService {
     // 7. Execute everything in a single transaction
     const result = await this.db.$transaction(
       async (tx) => {
+        // Lock order: Store → Customer → Debts → Invoices. Store first — see
+        // create()'s comment. This transaction touches Products (stock
+        // restore/deduct, below) after the customer lock, and SyncService.push
+        // locks the store first, then reaches customer rows via FOR KEY SHARE
+        // through debt.createMany — without taking the store lock here first
+        // too, this transaction (Customer → Product) and a concurrent push
+        // (Store → Product → Customer) can cycle. A 40P01 deadlock is unmapped
+        // by PrismaExceptionFilter and would reach the till as a 500.
+        await tx.$executeRaw`SELECT id FROM stores WHERE id = ${sid} FOR UPDATE`;
+
+        // Lock order: customer first, always. When the invoice is being moved
+        // to a different customer both rows are locked, ordered by id, so two
+        // opposite reassignments cannot deadlock.
+        const lockIds = [
+          ...new Set(
+            [invoice.customerId, customerId].filter((c): c is string => !!c),
+          ),
+        ].sort();
+        const lockedById = new Map<
+          string,
+          Awaited<ReturnType<typeof lockCustomerForCredit>>
+        >();
+        for (const cid of lockIds) {
+          // allowArchived: NOT what makes general editing of an archived
+          // customer's invoice work — a plain PATCH already 404s earlier, at
+          // the pre-transaction customer-existence check (`isDeleted: false`)
+          // above, before this transaction ever opens, and this option can't
+          // undo that. What it buys is the two paths that DO reach here for
+          // an archived customer specifically because that check doesn't
+          // apply to them: reassigning the invoice away (dto.customerId
+          // points at someone else, so the pre-tx check only validates the
+          // NEW customer) and converting a credit-covered DEBT/PARTIAL
+          // invoice to CASH/ONLINE (needsCustomer becomes false, so customerId
+          // is null and the pre-tx check never runs at all). Both still have
+          // to reverse the archived customer's credit inside this
+          // transaction. See the comment on lockCustomerForCredit.
+          lockedById.set(
+            cid,
+            await lockCustomerForCredit(tx, sid, cid, { allowArchived: true }),
+          );
+        }
+
+        // Reverse every credit this invoice consumed, back to the customer
+        // who funded it — NOT to whoever the invoice is being moved to.
+        // Crediting the new customer would transfer one person's money to
+        // another with no ledger trace.
+        //
+        // `invoice.debt.payments` (the pre-transaction read at the top of
+        // update()) is stale the moment we reach here: a concurrent
+        // DebtService.payForCustomer/pay could have inserted a CREDIT payment
+        // after that read but before this lock. Reading it live — now that
+        // the customer lock makes the debt's payment set stand still — is
+        // what makes the reversal (and the invoice.paid it writes) agree with
+        // debt.paid instead of silently diverging into an unpayable,
+        // permanently-500ing invoice.
+        if (invoice.debt && invoice.customerId) {
+          const livePayments = await tx.debtPayment.findMany({
+            where: { debtId: invoice.debt.id },
+            select: { id: true, amount: true, source: true },
+          });
+          const original = lockedById.get(invoice.customerId)!;
+          original.creditBalance = await reverseCreditOnDebt(tx, {
+            sid,
+            customerId: invoice.customerId,
+            currentBalance: original.creditBalance,
+            debtId: invoice.debt.id,
+            invoiceId: id,
+            invoiceNumber: invoice.number,
+            payments: livePayments,
+            notesLabel: 'تعديل الفاتورة',
+          });
+        }
+
         if (newInvoiceItems !== null) {
           // a. Restore stock for all OLD items. updateMany per item — each
           //    one is a single atomic UPDATE. stockPiecesOf() covers lines
@@ -546,10 +704,18 @@ export class InvoiceService {
 
         // d. Handle debt record changes — when modifying an existing debt
         //    row, lock it first so a concurrent debt-payment can't interleave.
+        //
+        //    `debtTouched` records whether this step wrote the debt row at
+        //    all. `updatedInvoice.debt` above (step c) was read AFTER the
+        //    reversal but BEFORE this step runs, so it's stale the moment
+        //    any of these three branches fires — independent of whether the
+        //    credit re-application below applies anything.
+        let debtTouched = false;
         if (wasDebt && !needsCustomer) {
           // DEBT/PARTIAL → CASH/ONLINE: delete the debt (validated above: no payments)
           if (invoice.debt) {
             await tx.debt.delete({ where: { id: invoice.debt.id } });
+            debtTouched = true;
           }
         } else if (!wasDebt && needsCustomer) {
           // CASH/ONLINE → DEBT/PARTIAL: create a new debt
@@ -563,6 +729,7 @@ export class InvoiceService {
               storeId: sid,
             },
           });
+          debtTouched = true;
         } else if (wasDebt && needsCustomer && invoice.debt) {
           // DEBT/PARTIAL → DEBT/PARTIAL: lock and update existing debt.
           const lockedDebtRows = await tx.$queryRaw<
@@ -595,9 +762,94 @@ export class InvoiceService {
               customerId: customerId!,
             },
           });
+          debtTouched = true;
+
+          // Re-mirror the invoice onto the debt. Step c wrote the AT-SALE
+          // figures (paid = what was handed over at the till), which is right
+          // for deriving the principal but drops the repayments the customer
+          // has since made — leaving the invoice claiming more is outstanding
+          // than the debt does. Every other money path keeps these two in
+          // step (DebtService.pay, payForCustomer and spendCreditOnDebt all
+          // mirror onto the invoice), so restore that here.
+          //
+          // paid + remaining still sums to total, so invoice_balance_consistent
+          // holds; the credit re-application below then increments on top.
+          const mirroredRemaining = Prisma.Decimal.max(
+            newDebtRemaining,
+            new Prisma.Decimal(0),
+          );
+          await tx.invoice.update({
+            where: { id },
+            data: {
+              paid: total.minus(mirroredRemaining),
+              remaining: mirroredRemaining,
+            },
+          });
         }
 
-        return updatedInvoice;
+        // Re-apply credit to whatever the recomputed debt still owes, from the
+        // customer the invoice now belongs to.
+        let finalInvoice = updatedInvoice;
+        let creditApplied = new Prisma.Decimal(0);
+        if (needsCustomer && customerId) {
+          const freshDebt = await tx.debt.findFirst({
+            where: { invoiceId: id },
+            select: { id: true, remaining: true },
+          });
+          const holder = lockedById.get(customerId);
+          if (freshDebt && holder && holder.creditBalance.gt(0)) {
+            const debtRemaining = new Prisma.Decimal(freshDebt.remaining);
+            if (debtRemaining.gt(0)) {
+              const { applied, newBalance } = await spendCreditOnDebt(tx, {
+                sid,
+                customerId,
+                currentBalance: holder.creditBalance,
+                debtId: freshDebt.id,
+                debtRemaining,
+                invoiceId: id,
+              });
+              // Write the fresh balance back onto the locked holder —
+              // symmetric with the reversal above (`original.creditBalance
+              // = await reverseCreditOnDebt(...)`). Nothing re-reads this
+              // particular local copy later in this function today, but
+              // leaving it stale here while keeping it fresh there is
+              // exactly the kind of asymmetry that bites the next person
+              // who adds a read after this block.
+              holder.creditBalance = newBalance;
+              creditApplied = applied;
+            }
+          }
+        }
+
+        // `updatedInvoice.debt` (step c) reflects the row AFTER the reversal
+        // above but BEFORE step d's write and any credit just re-applied —
+        // so it's stale whenever EITHER one touched the debt row, not only
+        // when credit was re-applied. The gate used to be `applied.gt(0)`
+        // alone: a PARTIAL/DEBT edit whose reversal-then-reapply round trip
+        // nets to zero credit movement (e.g. cash already covers the new
+        // total) still rewrites paid/remaining/isPaid in step d, and the
+        // till would be told about a debt the database no longer agrees
+        // with — see the fix-1 regression test below for the exact case.
+        if (debtTouched || creditApplied.gt(0)) {
+          finalInvoice = await tx.invoice.findUniqueOrThrow({
+            where: { id },
+            include: {
+              items: true,
+              customer: { select: { id: true, name: true, phone: true } },
+              debt: {
+                select: {
+                  id: true,
+                  amount: true,
+                  paid: true,
+                  remaining: true,
+                  isPaid: true,
+                },
+              },
+            },
+          });
+        }
+
+        return finalInvoice;
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
@@ -606,7 +858,7 @@ export class InvoiceService {
       },
     );
 
-    void this.cacheInvalidator.invalidateStoreData(sid);
+    await this.cacheInvalidator.invalidateStoreData(sid);
     return result;
   }
 
@@ -795,6 +1047,63 @@ export class InvoiceService {
       zero,
     );
 
+    // Credit movements are cash-vs-revenue, not sales. Two separate lines
+    // because they mean opposite things: money that entered the drawer but is
+    // not revenue, and revenue recognised without any cash arriving.
+    //
+    // Both are NET of their reversals — the CreditReason enum is directional
+    // precisely so a same-day void nets out instead of leaving a phantom.
+    const creditEntries = await this.db.creditEntry.findMany({
+      where: { storeId: sid, date: { gte: startOfDay, lt: endOfDay } },
+      select: { delta: true, reason: true },
+    });
+
+    const totalCreditReceived = creditEntries
+      .filter(
+        (e) =>
+          e.reason === 'OVERPAYMENT' || e.reason === 'OVERPAYMENT_REVERSED',
+      )
+      .reduce(
+        (acc, e) => acc.plus(new Prisma.Decimal(e.delta)),
+        new Prisma.Decimal(0),
+      );
+
+    const totalCreditApplied = creditEntries
+      .filter(
+        (e) =>
+          e.reason === 'APPLIED_TO_DEBT' || e.reason === 'APPLIED_REVERSED',
+      )
+      .reduce(
+        (acc, e) => acc.minus(new Prisma.Decimal(e.delta)),
+        new Prisma.Decimal(0),
+      );
+
+    // Cash a customer hands over LATER to pay down a debt never shows up
+    // above: totalCash/totalOnline filter by invoice.paymentMethod and
+    // totalPaid sums invoice.paid, but a debt repayment (POST
+    // /debts/:id/pay or /debts/customer/:id/pay) is not an invoice at all —
+    // it writes a debt_payments row directly. Without this, that cash is
+    // real money in the drawer with no line item reporting it.
+    //
+    // debt_payments has no storeId column, so scope through the debt
+    // relation instead. CREDIT-sourced payments are excluded on purpose —
+    // that money never crossed the drawer today, it was already banked as
+    // credit on an earlier day (or the same day, already counted in
+    // totalCreditReceived above).
+    //
+    // Actual cash in the drawer for the day = totalCash + totalCashDebtRepayments.
+    const debtRepaymentsCash = await this.db.debtPayment.aggregate({
+      where: {
+        source: 'CASH',
+        date: { gte: startOfDay, lt: endOfDay },
+        debt: { storeId: sid },
+      },
+      _sum: { amount: true },
+    });
+    const totalCashDebtRepayments = new Prisma.Decimal(
+      debtRepaymentsCash._sum.amount ?? 0,
+    );
+
     return {
       date: dayIso,
       summary: {
@@ -804,6 +1113,9 @@ export class InvoiceService {
         totalCash: totalCash.toString(),
         totalOnline: totalOnline.toString(),
         totalDebt: totalDebt.toString(),
+        totalCreditReceived: totalCreditReceived.toString(),
+        totalCreditApplied: totalCreditApplied.toString(),
+        totalCashDebtRepayments: totalCashDebtRepayments.toString(),
       },
       invoices,
     };
@@ -817,20 +1129,99 @@ export class InvoiceService {
       where: { id, storeId: sid },
       include: {
         items: { select: { productId: true, quantity: true, stockQuantity: true } },
-        debt: { select: { id: true, isPaid: true, payments: { select: { id: true } } } },
+        debt: {
+          select: {
+            id: true,
+            isPaid: true,
+            payments: { select: { id: true, amount: true, source: true } },
+          },
+        },
       },
     });
 
     if (!invoice) throw new NotFoundException('الفاتورة غير موجودة');
 
-    if (invoice.debt && !invoice.debt.isPaid && invoice.debt.payments.length > 0) {
+    // Only CASH locks an invoice. A credit-funded payment is reversible and is
+    // refunded below — the old guard let a fully credit-covered invoice through
+    // (isPaid was true) and cascade-deleted the customer's money with it.
+    const cashPayments =
+      invoice.debt?.payments.filter((p) => p.source === 'CASH') ?? [];
+    if (invoice.debt && !invoice.debt.isPaid && cashPayments.length > 0) {
       throw new BadRequestException(
-        'لا يمكن حذف فاتورة مرتبطة بدين عليه دفعات. قم بتسوية الدين أولاً.',
+        'لا يمكن حذف فاتورة مرتبطة بدين عليه دفعات مسجّلة. الرجاء تصحيح الفاتورة بدلاً من حذفها.',
       );
     }
 
     await this.db.$transaction(
       async (tx) => {
+        // Lock order: Store → Customer → Debts → Invoices. Store first — see
+        // create()'s comment. This transaction touches Products (stock
+        // restoration, below) after the customer lock, and a concurrent
+        // sync/push locks Store → Product → Customer (via FOR KEY SHARE on
+        // debt.createMany) — without the store lock here first too, the two
+        // can cycle. A 40P01 deadlock is unmapped by PrismaExceptionFilter
+        // and would reach the till as a 500.
+        await tx.$executeRaw`SELECT id FROM stores WHERE id = ${sid} FOR UPDATE`;
+
+        // Customer lock first — same rule as create/update. allowArchived:
+        // this is a reversal call site — see the comment on
+        // lockCustomerForCredit.
+        if (invoice.customerId) {
+          const locked = await lockCustomerForCredit(
+            tx,
+            sid,
+            invoice.customerId,
+            { allowArchived: true },
+          );
+
+          // The pre-transaction `invoice` read (findFirst above) is stale by
+          // the time we hold this lock: a concurrent DebtService.deletePayment
+          // could have deleted the very payment this snapshot lists, or
+          // payForCustomer/pay could have added a new one. Re-reading here —
+          // now that the lock makes the debt's payment set stand still — is
+          // what stops the CASH guard from missing a payment that landed in
+          // the gap (TOCTOU) and stops the credit reversal from granting
+          // money back for a payment that no longer exists (double-grant).
+          //
+          // isPaid is re-read live alongside the payments for the same
+          // reason, and the guard below mirrors the pre-transaction one
+          // exactly (`!isPaid && has a CASH payment`), not just the CASH
+          // check alone — dropping the isPaid half would block deleting a
+          // fully-settled historical invoice (its debt.isPaid is true) even
+          // though that CASH payment is never coming back and there is
+          // nothing left to lose track of. See "allows deleting a historical
+          // invoice after its settled customer is archived" below.
+          const liveDebt = invoice.debt
+            ? await tx.debt.findFirst({
+                where: { id: invoice.debt.id },
+                select: {
+                  isPaid: true,
+                  payments: { select: { id: true, amount: true, source: true } },
+                },
+              })
+            : null;
+          const livePayments = liveDebt?.payments ?? [];
+          const liveCashPayments = livePayments.filter((p) => p.source === 'CASH');
+
+          if (liveDebt && !liveDebt.isPaid && liveCashPayments.length > 0) {
+            throw new BadRequestException(
+              'لا يمكن حذف فاتورة مرتبطة بدين عليه دفعات مسجّلة. الرجاء تصحيح الفاتورة بدلاً من حذفها.',
+            );
+          }
+
+          // debtId/invoiceId omitted — the invoice (and its debt/payments,
+          // which cascade via the FK) is deleted below in this same
+          // transaction, so only the credit grant matters.
+          await reverseCreditOnDebt(tx, {
+            sid,
+            customerId: invoice.customerId,
+            currentBalance: locked.creditBalance,
+            invoiceNumber: invoice.number,
+            payments: livePayments,
+            notesLabel: 'حذف الفاتورة',
+          });
+        }
+
         for (const item of invoice.items) {
           if (item.productId) {
             await tx.product.updateMany({
@@ -849,6 +1240,6 @@ export class InvoiceService {
       },
     );
 
-    void this.cacheInvalidator.invalidateStoreData(sid);
+    await this.cacheInvalidator.invalidateStoreData(sid);
   }
 }

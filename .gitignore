@@ -56,3 +56,9 @@ pids
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 /generated/prisma
+
+# Never commit env backups — these carry JWT_SECRET, DB URLs and API keys.
+# The bare `.env` rule above matches that exact name only, so a file like
+# `.env.backup-before-railway-switch` slips past it.
+.env.*
+!.env.example
