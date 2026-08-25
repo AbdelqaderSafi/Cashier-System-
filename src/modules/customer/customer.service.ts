@@ -13,6 +13,10 @@ import { paginate, paginatedResponse } from '../../common/utils/pagination';
 import { CacheInvalidationService } from '../../common/cache/cache-invalidation.service';
 import { signedBalance } from '../debt/credit.util';
 import { lockCustomerForCredit, takeCredit } from '../debt/credit.tx';
+import {
+  toCustomerPayment,
+  CUSTOMER_PAYMENT_INCLUDE,
+} from '../debt/debt.service';
 
 export type CustomerWithBalance = Customer & { balance: string };
 
@@ -213,12 +217,33 @@ export class CustomerService {
     });
     const totalRemaining = new Prisma.Decimal(owed._sum.remaining ?? 0);
 
+    // The record of cash actually taken across the counter, newest first.
+    //
+    // This is NOT debts[].payments. That array is the ALLOCATION — how one
+    // payment was spread over individual debts — so a 150 taken against a 100
+    // debt shows there as 100. Only this list carries the 150.
+    //
+    // Spending stored credit on a later invoice creates no row here, because
+    // no new cash was received; it is the customer's own money moving.
+    const operations = await this.db.debtPaymentOperation.findMany({
+      where: { customerId: id, storeId: sid },
+      include: CUSTOMER_PAYMENT_INCLUDE,
+      // `id` breaks the tie: `date` defaults to CURRENT_TIMESTAMP, so two
+      // payments taken in the same instant would otherwise order at random.
+      orderBy: [{ date: 'desc' }, { id: 'desc' }],
+      // Capped like the sibling `invoices` list on this same response — a
+      // long-standing customer's history should not grow the till payload
+      // without bound.
+      take: 50,
+    });
+
     return {
       ...customer,
       balance: signedBalance(
         new Prisma.Decimal(customer.creditBalance),
         totalRemaining,
       ).toString(),
+      customerPayments: operations.map(toCustomerPayment),
     };
   }
 

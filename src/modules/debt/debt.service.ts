@@ -26,6 +26,81 @@ import {
   spendCreditOnDebt,
 } from './credit.tx';
 
+/**
+ * A debt_payment_operations row as far as the payment record cares. Enough of
+ * it to shape the wire response; the linked rows are only needed when the
+ * stored split is null.
+ */
+export type CustomerPaymentRow = {
+  id: string;
+  customerId: string;
+  amount: Prisma.Decimal;
+  appliedToDebt: Prisma.Decimal | null;
+  addedToCredit: Prisma.Decimal | null;
+  notes: string | null;
+  date: Date;
+  clientOperationId: string | null;
+  creditEntries?: { delta: Prisma.Decimal; reason: CreditReason }[];
+};
+
+/**
+ * Shape one operation row as the customer-payment record the API exposes.
+ *
+ * `appliedToDebt` / `addedToCredit` are null on rows written before those
+ * columns existed, and the additive-only migration rule forbids backfilling
+ * them on production. Rather than reporting a zero split — which would be a
+ * lie, not a gap — derive it.
+ *
+ * Derive from the OVERPAYMENT credit entry, not from the CASH debt_payments.
+ * Both give the same answer while every row is intact, but the payment rows do
+ * not survive: deleting an invoice cascades Invoice -> Debt -> DebtPayment
+ * away, and deletePayment removes them outright. Summing what is left would
+ * report a 150 receipt as "0 to debt, 150 to credit" — silently rewriting
+ * history, which is the exact failure the stored columns exist to prevent.
+ * Credit entries survive both paths: only `debtPaymentId` is SetNull, and
+ * `operationId` is never cleared.
+ */
+export function toCustomerPayment(op: CustomerPaymentRow) {
+  const amount = new Prisma.Decimal(op.amount);
+
+  let added: Prisma.Decimal;
+  if (op.addedToCredit !== null) {
+    added = new Prisma.Decimal(op.addedToCredit);
+  } else {
+    added = (op.creditEntries ?? [])
+      .filter((e) => e.reason === 'OVERPAYMENT')
+      .reduce((acc, e) => acc.plus(new Prisma.Decimal(e.delta)), new Prisma.Decimal(0));
+  }
+  added = Prisma.Decimal.min(
+    Prisma.Decimal.max(added, new Prisma.Decimal(0)),
+    amount,
+  );
+
+  const applied =
+    op.appliedToDebt !== null
+      ? new Prisma.Decimal(op.appliedToDebt)
+      : amount.minus(added);
+
+  return {
+    id: op.id,
+    customerId: op.customerId,
+    amount: amount.toString(),
+    appliedToDebt: applied.toString(),
+    addedToCredit: added.toString(),
+    notes: op.notes,
+    paidAt: op.date,
+    clientOperationId: op.clientOperationId,
+  };
+}
+
+/**
+ * The include a read needs so toCustomerPayment can derive the split for a row
+ * that predates the stored columns. Shared so the two read sites cannot drift.
+ */
+export const CUSTOMER_PAYMENT_INCLUDE = {
+  creditEntries: { select: { delta: true, reason: true } },
+} as const;
+
 export type PaginatedDebts = {
   data: Debt[];
   meta: {
@@ -566,6 +641,7 @@ export class DebtService {
               paymentApplied: new Prisma.Decimal(existing.amount),
               payments: existing.payments,
               creditEntries: existing.creditEntries,
+              paymentRecord: existing,
             });
           }
         }
@@ -596,6 +672,7 @@ export class DebtService {
             customerId,
             storeId: sid,
             clientOperationId: dto.clientOperationId ?? null,
+            notes: dto.notes ?? null,
           },
         });
 
@@ -702,6 +779,18 @@ export class DebtService {
           });
         }
 
+        // Record how the cash split, now that allocation is done. The row was
+        // created before the loops because every DebtPayment needs its id.
+        //
+        // appliedToDebt is the CASH that landed on debts — not creditApplied.
+        // Credit spent here was already the customer's money; counting it as
+        // part of this payment would report more cash than crossed the counter.
+        const appliedToDebt = amount.minus(excess);
+        const paymentRecord = await tx.debtPaymentOperation.update({
+          where: { id: operation.id },
+          data: { appliedToDebt, addedToCredit: excess },
+        });
+
         return this.buildPayForCustomerResult(tx, sid, customerId, {
           paymentApplied: amount,
           affectedDebts: [...perDebt.entries()].map(([debtId, v]) => ({
@@ -712,6 +801,7 @@ export class DebtService {
           })),
           creditApplied,
           excessToCredit: excess,
+          paymentRecord,
         });
       },
       {
@@ -753,6 +843,7 @@ export class DebtService {
         source: PaymentSource;
       }[];
       creditEntries?: { delta: Prisma.Decimal; reason: CreditReason }[];
+      paymentRecord: CustomerPaymentRow;
     },
   ) {
     const zero = new Prisma.Decimal(0);
@@ -843,6 +934,10 @@ export class DebtService {
       customer: customer
         ? { id: customer.id, name: customer.name, phone: customer.phone }
         : null,
+      // The record of what actually crossed the counter, as one row. Every
+      // other field here describes the ALLOCATION of that money; this is the
+      // money itself.
+      payment: toCustomerPayment(src.paymentRecord),
       paymentApplied: src.paymentApplied.toString(),
       affectedDebts: affectedDebts ?? [],
       creditApplied: creditApplied.toString(),

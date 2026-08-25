@@ -344,7 +344,22 @@ model DebtPaymentOperation {
   // index, so online-only calls are unconstrained — same trick as
   // invoices_storeId_clientInvoiceId_key.
   clientOperationId String?
+  // The FULL amount the cashier took across the counter — not the part that
+  // landed on debts. debt_payments only ever records the allocated portion, so
+  // without this row a 150 handed over against a 100 debt is unrecoverable
+  // after the response is gone.
   amount            Decimal  @db.Decimal(10, 2)
+  // How that amount was split. Both are snapshots, deliberately stored rather
+  // than derived: deleting an invoice cascades its debt_payments away, and a
+  // derived figure would then silently rewrite history.
+  //
+  // Nullable, not DEFAULT 0 — rows written before these columns existed have an
+  // UNKNOWN split, not a zero one, and the additive-only migration rule forbids
+  // backfilling them. Reads fall back to deriving the split from the linked
+  // payments and credit entries when these are null.
+  appliedToDebt     Decimal? @db.Decimal(10, 2)
+  addedToCredit     Decimal? @db.Decimal(10, 2)
+  notes             String?
   date              DateTime @default(now())
 
   customerId String

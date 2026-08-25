@@ -2388,4 +2388,239 @@ describe('Customer credit balance (e2e)', () => {
       expect(after.body.summary.totalPaid).toBe(beforePaid);
     });
   });
+
+  // ─── The customer payment record ──────────────────────────────────────────
+  //
+  // debt_payments only ever records the portion allocated to a debt, so a 150
+  // handed across the counter against a 100 debt used to leave no trace of the
+  // 150 anywhere readable. The operation row always held it; these tests pin
+  // that it is now filled in and exposed.
+  describe('Customer payment record', () => {
+    let ctx: Ctx;
+    let productId: string;
+
+    beforeAll(async () => {
+      ctx = await bootstrap();
+      const product = await ctx.db.product.create({
+        data: {
+          name: 'Payment Record Widget',
+          price: new Prisma.Decimal(10),
+          wholesalePrice: new Prisma.Decimal(4),
+          stock: 1000,
+          storeId: ctx.storeId,
+        },
+      });
+      productId = product.id;
+    });
+
+    afterAll(async () => {
+      await teardown(ctx);
+    });
+
+    const newCustomer = async (name: string) =>
+      (await ctx.db.customer.create({ data: { name, storeId: ctx.storeId } })).id;
+
+    const oweOnDebt = async (customerId: string, qty: number) => {
+      const res = await request(ctx.server)
+        .post('/api/invoices')
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({ paymentMethod: 'DEBT', customerId, items: [{ productId, quantity: qty }] });
+      expect(res.status).toBe(201);
+      return res.body.id as string;
+    };
+
+    // The acceptance case from the request: owes 100, pays 150.
+    it('records the full 150 as one payment, split 100 / 50', async () => {
+      const customerId = await newCustomer('Full Record');
+      await oweOnDebt(customerId, 10); // total 100
+
+      const res = await request(ctx.server)
+        .post(`/api/debts/customer/${customerId}/pay`)
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({ amount: 150, notes: 'دفعة كاملة' });
+
+      expect(res.status).toBe(201);
+      expect(res.body.payment).toBeDefined();
+      expect(res.body.payment.customerId).toBe(customerId);
+      expect(res.body.payment.amount).toBe('150');
+      expect(res.body.payment.appliedToDebt).toBe('100');
+      expect(res.body.payment.addedToCredit).toBe('50');
+      expect(res.body.payment.notes).toBe('دفعة كاملة');
+      expect(res.body.payment.paidAt).toBeDefined();
+      expect(res.body.payment.id).toBeDefined();
+
+      expect(res.body.summary.totalRemaining).toBe('0');
+      expect(res.body.summary.creditBalance).toBe('50');
+      expect(res.body.summary.balance).toBe('50');
+    });
+
+    it('exposes it on the customer as customerPayments, newest first', async () => {
+      const customerId = await newCustomer('History');
+      await oweOnDebt(customerId, 10); // total 100
+
+      await request(ctx.server)
+        .post(`/api/debts/customer/${customerId}/pay`)
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({ amount: 40 });
+      await request(ctx.server)
+        .post(`/api/debts/customer/${customerId}/pay`)
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({ amount: 110 });
+
+      const res = await request(ctx.server)
+        .get(`/api/customers/${customerId}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.customerPayments)).toBe(true);
+      expect(res.body.customerPayments).toHaveLength(2);
+
+      // Newest first: the 110 was taken after the 40.
+      expect(res.body.customerPayments[0].amount).toBe('110');
+      expect(res.body.customerPayments[1].amount).toBe('40');
+
+      // 100 debt: 40 settles part, then 110 settles the remaining 60 and banks 50.
+      expect(res.body.customerPayments[0].appliedToDebt).toBe('60');
+      expect(res.body.customerPayments[0].addedToCredit).toBe('50');
+      expect(res.body.customerPayments[1].appliedToDebt).toBe('40');
+      expect(res.body.customerPayments[1].addedToCredit).toBe('0');
+    });
+
+    // The whole point of the separation: debts[].payments is the per-debt
+    // allocation, NOT the record of cash taken.
+    it('keeps debts[].payments as the per-debt allocation', async () => {
+      const customerId = await newCustomer('Allocation');
+      await oweOnDebt(customerId, 10); // total 100
+
+      await request(ctx.server)
+        .post(`/api/debts/customer/${customerId}/pay`)
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({ amount: 150 });
+
+      const res = await request(ctx.server)
+        .get(`/api/debts/customer/${customerId}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+
+      expect(res.status).toBe(200);
+      // The debt saw 100, not 150 — the surplus never belonged to it.
+      const allocated = res.body.debts[0].payments
+        .map((p: { amount: string }) => new Prisma.Decimal(p.amount))
+        .reduce((a: Prisma.Decimal, b: Prisma.Decimal) => a.plus(b), new Prisma.Decimal(0));
+      expect(allocated.equals(100)).toBe(true);
+    });
+
+    // Spending stored credit is not new cash across the counter, so it must
+    // NOT produce a payment record.
+    it('does not record a payment when stored credit settles a new invoice', async () => {
+      const customerId = await newCustomer('Credit Spend');
+      await request(ctx.server)
+        .post(`/api/debts/customer/${customerId}/pay`)
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({ amount: 80 }); // no debts yet -> all 80 becomes credit
+
+      const before = await request(ctx.server)
+        .get(`/api/customers/${customerId}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+      expect(before.body.customerPayments).toHaveLength(1);
+
+      // A new debt invoice consumes the credit — no cash changes hands.
+      await oweOnDebt(customerId, 5); // total 50, fully covered by credit
+
+      const after = await request(ctx.server)
+        .get(`/api/customers/${customerId}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+      expect(after.body.customerPayments).toHaveLength(1);
+      expect(after.body.customerPayments[0].amount).toBe('80');
+    });
+
+    it('reports the split for a row written before the columns existed', async () => {
+      // Simulates production rows: the operation exists with its full amount,
+      // but the split columns are null because they did not exist when it was
+      // written. Reads must derive the truth, never report zeros.
+      const customerId = await newCustomer('Legacy Row');
+      await oweOnDebt(customerId, 10); // total 100
+
+      const pay = await request(ctx.server)
+        .post(`/api/debts/customer/${customerId}/pay`)
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({ amount: 150 });
+      expect(pay.status).toBe(201);
+
+      await ctx.db.debtPaymentOperation.update({
+        where: { id: pay.body.payment.id },
+        data: { appliedToDebt: null, addedToCredit: null },
+      });
+
+      const res = await request(ctx.server)
+        .get(`/api/customers/${customerId}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+
+      expect(res.body.customerPayments[0].appliedToDebt).toBe('100');
+      expect(res.body.customerPayments[0].addedToCredit).toBe('50');
+    });
+
+    // The hard half of the legacy case: the split columns are null AND the
+    // linked debt_payments are gone, which is what deleting the invoice does
+    // (Invoice -> Debt -> DebtPayment all cascade). Deriving from the payment
+    // rows would report "0 to debt, 150 to credit" here — a rewritten history.
+    // The OVERPAYMENT credit entry survives, so the split stays truthful.
+    it('reports the split for a legacy row whose payments were deleted', async () => {
+      const customerId = await newCustomer('Legacy Cascaded');
+      const invoiceId = await oweOnDebt(customerId, 10); // total 100
+
+      const pay = await request(ctx.server)
+        .post(`/api/debts/customer/${customerId}/pay`)
+        .set('Authorization', `Bearer ${ctx.token}`)
+        .send({ amount: 150 });
+      expect(pay.status).toBe(201);
+
+      // Make it look pre-migration.
+      await ctx.db.debtPaymentOperation.update({
+        where: { id: pay.body.payment.id },
+        data: { appliedToDebt: null, addedToCredit: null },
+      });
+
+      // Deleting the invoice cascades the debt and its payment rows away.
+      const del = await request(ctx.server)
+        .delete(`/api/invoices/${invoiceId}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+      expect(del.status).toBe(204);
+
+      const survivors = await ctx.db.debtPayment.count({
+        where: { operationId: pay.body.payment.id },
+      });
+      expect(survivors).toBe(0);
+
+      const res = await request(ctx.server)
+        .get(`/api/customers/${customerId}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+
+      expect(res.body.customerPayments[0].amount).toBe('150');
+      expect(res.body.customerPayments[0].appliedToDebt).toBe('100');
+      expect(res.body.customerPayments[0].addedToCredit).toBe('50');
+    });
+
+    it('replaying the same clientOperationId does not add a second record', async () => {
+      const customerId = await newCustomer('Replay');
+      await oweOnDebt(customerId, 10);
+      const key = `rec-${randomUUID()}`;
+
+      for (let i = 0; i < 2; i++) {
+        const r = await request(ctx.server)
+          .post(`/api/debts/customer/${customerId}/pay`)
+          .set('Authorization', `Bearer ${ctx.token}`)
+          .send({ amount: 150, clientOperationId: key });
+        expect(r.status).toBe(201);
+        expect(r.body.payment.amount).toBe('150');
+        // A replay must return the same SPLIT, not just the same total.
+        expect(r.body.payment.appliedToDebt).toBe('100');
+        expect(r.body.payment.addedToCredit).toBe('50');
+      }
+
+      const res = await request(ctx.server)
+        .get(`/api/customers/${customerId}`)
+        .set('Authorization', `Bearer ${ctx.token}`);
+      expect(res.body.customerPayments).toHaveLength(1);
+    });
+  });
 });
