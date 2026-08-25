@@ -1,0 +1,20 @@
+-- Let a deleted payment stop reading as received.
+--
+-- debt_payment_operations is now rendered as the shop's payment log, and the
+-- till is reconciled against it. Deleting a payment un-allocates the debt and
+-- withdraws any surplus it created, but never touched this row — so a 150 that
+-- has been completely undone still reported "received 150", leaving the owner
+-- an unexplained gap between the drawer and the report.
+--
+-- A timestamp rather than a boolean: reconciling a day needs to know WHEN the
+-- reversal happened, not just that it did.
+--
+-- NULLABLE with no DEFAULT, so this is metadata-only in PostgreSQL 11+ and does
+-- not rewrite the table. Every existing row is correctly left standing: null
+-- means "not reversed", which is true of all of them — deletePayment has never
+-- been able to set this column before now.
+--
+-- The row is deliberately still never deleted. It carries the unique
+-- clientOperationId that makes an offline device's retry idempotent; dropping
+-- it on reversal would let that retry come back and charge the customer twice.
+ALTER TABLE "debt_payment_operations" ADD COLUMN "reversedAt" TIMESTAMP(3);
