@@ -62,7 +62,14 @@ export class CustomerController {
   @Roles('ADMIN', 'CASHIER')
   @ApiOperation({ summary: 'جلب عميل بالمعرّف (يشمل آخر 20 فاتورة وكافة الديون مع سجل الدفعات)' })
   @ApiParam({ name: 'id', format: 'uuid', description: 'معرّف العميل' })
-  @ApiResponse({ status: 200, description: 'العميل مع فواتيره وديونه' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'العميل مع فواتيره وديونه، و customerPayments: آخر 50 عملية قبض على حساب ' +
+      'العميل (مع customerPaymentsTotal = العدد الكلي). ' +
+      'تنبيه: هاد السجل يغطي POST /debts/customer/:customerId/pay فقط — ' +
+      'الدفع على دين مفرد و sync/push يقبضان نقداً ولا يظهران فيه.',
+  })
   @ApiResponse({ status: 404, description: 'العميل غير موجود' })
   findOne(@StoreId() sid: string, @Param('id', ParseUUIDPipe) id: string) {
     return this.customerService.findOne(sid, id);
