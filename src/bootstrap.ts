@@ -13,7 +13,15 @@ export function configureApp(app: INestApplication): void {
   if (env.ALLOWED_ORIGINS.length > 0) {
     app.enableCors({
       origin: env.ALLOWED_ORIGINS,
-      credentials: true,
+      // The cashier front end authenticates with a Bearer token, never a
+      // cookie, so there are no credentials for the browser to attach and
+      // inviting it to send them would only widen the surface.
+      credentials: false,
+      // ThrottlerGuard sets Retry-After when it returns a 429. The browser
+      // hides every response header from cross-origin JavaScript unless it is
+      // listed here, so without this the front end can see that it was
+      // throttled but not tell the cashier how long to wait.
+      exposedHeaders: ['Retry-After'],
     });
   }
 
