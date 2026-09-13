@@ -1,0 +1,68 @@
+name: Railway Database Backup
+
+on:
+  schedule:
+    # يعمل تلقائياً كل يوم الساعة 3 فجراً بتوقيت جرينتش
+    - cron: '0 3 * * *'
+  workflow_dispatch: # هذا السطر مهم جداً لأنه يسمح لك بتشغيل السكربت يدوياً بضغطة زر
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # 1. تثبيت أدوات قاعدة البيانات على سيرفر جيتهاب
+      # نسخة ubuntu-latest تأتي بـ PostgreSQL 16، وسيرفر Railway يعمل على 18،
+      # و pg_dump يرفض أي سيرفر أحدث منه. لذلك نثبّت العميل 18 من مستودع PGDG الرسمي.
+      - name: Install PostgreSQL 18 client
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -qq postgresql-client-18
+          # نضع مجلد نسخة 18 في مقدمة PATH لأن نسخة 16 المثبتة مسبقاً تسبقه
+          echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
+
+      # 2. التأكد أن النسخة المثبتة فعلاً هي 18 (نفشل بوضوح بدل أن ننجح بنسخة خاطئة)
+      - name: Verify pg_dump version
+        shell: bash
+        run: |
+          set -euo pipefail
+          pg_dump --version
+          MAJOR="$(pg_dump --version | grep -oE '[0-9]+' | head -1)"
+          if [ "$MAJOR" -lt 18 ]; then
+            echo "::error::pg_dump $MAJOR is older than the PostgreSQL 18 server"
+            exit 1
+          fi
+
+      # 3. سحب الداتا من Railway باستخدام الرابط السري
+      # الرابط يُمرَّر كمتغير بيئة وليس داخل سطر الأوامر، حتى لا يظهر في قائمة العمليات
+      # ولا ينكسر الأمر إذا احتوت كلمة السر على رموز خاصة
+      - name: Dump Database
+        shell: bash
+        env:
+          DB_URL: ${{ secrets.DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DB_URL:-}" ]; then
+            echo "::error::Secret DB_URL is not set in repository settings"
+            exit 1
+          fi
+          pg_dump --format=custom --no-owner --no-privileges --file=backup.dump "$DB_URL"
+          ls -lh backup.dump
+          test -s backup.dump
+
+      # 4. حفظ الملف الناتج في جيتهاب لتتمكن من تحميله
+      - name: Upload Backup File
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-backup-file
+          path: backup.dump
+          retention-days: 30
+          if-no-files-found: error
